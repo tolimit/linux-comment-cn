@@ -293,19 +293,30 @@ void kvfree(const void *addr)
 }
 EXPORT_SYMBOL(kvfree);
 
+/* 获取此页对应的address_space */
 struct address_space *page_mapping(struct page *page)
 {
 	struct address_space *mapping = page->mapping;
 
 	/* This happens if someone calls flush_dcache_page on slab page */
+	/* 此页用于slab时处理，直接返回NULL */
 	if (unlikely(PageSlab(page)))
 		return NULL;
 
+	/* 此页用于swap cache时的处理，swap cache用于保存匿名页，但是当你用malloc分配内存的 
+	 * 时候，并不马上放到swap cache中，而是在进程中不再使用该内存的 
+	 * 时候它才被读入swap cache中。这些页对应的文件会为swapfile
+	 */
 	if (unlikely(PageSwapCache(page))) {
 		swp_entry_t entry;
 
+		/* 获取在swap cache中的偏移量 */
 		entry.val = page_private(page);
+		/* 根据偏移量从swapper_spaces数组中获取address_space
+		 * 疑问: 那从swapper_spaces中获取的address_space与page->mapping是不同的?
+		 */
 		mapping = swap_address_space(entry);
+		/* 如果是匿名页，并没有放入swap cache，则mapping为空 */
 	} else if ((unsigned long)mapping & PAGE_MAPPING_ANON)
 		mapping = NULL;
 	return mapping;

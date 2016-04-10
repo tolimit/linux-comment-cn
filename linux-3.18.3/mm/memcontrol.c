@@ -380,6 +380,7 @@ struct mem_cgroup {
 	struct list_head event_list;
 	spinlock_t event_list_lock;
 
+	/* memcg会为每个node的每个zone维护一个结构，这个结构里面有这个memcg在这个zone的lru链表 */
 	struct mem_cgroup_per_node *nodeinfo[0];
 	/* WARNING: nodeinfo must be the last member here */
 };

@@ -58,7 +58,7 @@ struct page {
 					 * updated asynchronously */
 	union {
 		/* 如果为空，则该页属于交换高速缓存(swap cache，swap时会产生竞争条件，用swap cache解决)  
-		 * 不为空，最低位为0，表示该页为映射页(文件映射)，执行对应文件的struct address_space
+		 * 不为空，最低位为0，表示该页为映射页(文件映射)，指向对应文件的struct address_space
 		 * 不为空，最低位为1，表示该页为匿名页，指向对应的anon_vma
 		 */
 		struct address_space *mapping;	/* If low bit clear, points to
@@ -76,7 +76,9 @@ struct page {
 	/* Second double word */
 	struct {
 		union {
-			/* 作为不同的含义被几种内核成分使用。例如，它在页磁盘映像或匿名区中标识存放在页框中的数据的位置，或者它存放一个换出页标识符 */
+			/* 作为不同的含义被几种内核成分使用。例如，它在页磁盘映像或匿名区中标识存放在页框中的数据的位置，或者它存放一个换出页标识符
+			 * 当此页作为映射页(文件映射)时，保存这块页的数据在整个文件数据中以页为大小的偏移量
+			 */
 			pgoff_t index;		/* Our offset within mapping. */
 			/* 用于SLAB和SLUB描述符，指向空闲对象链表 */
 			void *freelist;	
@@ -141,6 +143,9 @@ struct page {
 					int units;	/* SLOB */
 				};
 				/* 页框的引用计数，如果为-1，则此页框空闲，并可分配给任一进程或内核；如果大于或等于0，则说明页框被分配给了一个或多个进程，或用于存放内核数据。page_count()返回_count加1的值，也就是该页的使用者数目 */
+				/* 加入到lru链表的页这个引用计数会++，相反，从lru中拿出，_count会--
+				 * 此参数在内存回收的时候有很重要的意义
+				 */
 				atomic_t _count;		/* Usage count, see below. */
 			};
 			/* 用于SLAB时描述当前SLAB已经使用的对象 */

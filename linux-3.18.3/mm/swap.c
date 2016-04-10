@@ -40,9 +40,18 @@
 /* How many pages do we try to swap or page in/out together? */
 int page_cluster;
 
+/* 这部分的lru缓存是用于那些原来不属于lru链表的，新加入进来的页 */
 static DEFINE_PER_CPU(struct pagevec, lru_add_pvec);
+/* 在这个lru_rotate_pvecs中的页都是非活动页并且在非活动lru链表中，将这些页移动到非活动lru链表的末尾 */
 static DEFINE_PER_CPU(struct pagevec, lru_rotate_pvecs);
+/* 在这个lru缓存的页原本应属于活动lru链表中的页，会强制清除PG_activate和PG_referenced，并加入到非活动页lru链表的链表表头中
+ * 这些页从活动lru链表中的尾部拿出来的
+ */
 static DEFINE_PER_CPU(struct pagevec, lru_deactivate_pvecs);
+#ifdef CONFIG_SMP
+/* 将cpu的activate_page_pvecs中的页放到活动页lru链表头中，这些页原本属于非活动lru链表的页 */
+static DEFINE_PER_CPU(struct pagevec, activate_page_pvecs);
+#endif
 
 /*
  * This path almost never happens for VM activity - pages are normally
@@ -516,8 +525,6 @@ static void __activate_page(struct page *page, struct lruvec *lruvec,
 }
 
 #ifdef CONFIG_SMP
-static DEFINE_PER_CPU(struct pagevec, activate_page_pvecs);
-
 static void activate_page_drain(int cpu)
 {
 	struct pagevec *pvec = &per_cpu(activate_page_pvecs, cpu);
@@ -600,6 +607,16 @@ static void __lru_cache_activate_page(struct page *page)
  * When a newly allocated page is not yet visible, so safe for non-atomic ops,
  * __SetPageReferenced(page) may be substituted for mark_page_accessed(page).
  */
+/* 标记此页最近被访问过，如果此页在lru链表中，则移动到活动页lru链表头，如果不在lru链表中，则加入到lru_add_pvec准备加入活动lru链表
+ * 注意: 只有在页的PG_referenced置位了，这里面才会将页放到活动页lru链表
+ * 此函数调用位置:
+ * 1.当此页被作为进程的一个匿名页时(do_anonymous_page())
+ * 2.当此页被用于映射文件时(filemap_nopage())
+ * 3.当此页被作为共享内存区的一个页时(shmem_nopage())
+ * 4.当从文件读取数据到此页时(do_generic_file_read())
+ * 5.当此页被swap换入的数据填充时(do_swap_page())
+ * 6.当在page cache中搜索此页并访问到时(__find_get_block())
+ */
 void mark_page_accessed(struct page *page)
 {
 	if (!PageActive(page) && !PageUnevictable(page) &&
@@ -611,22 +628,30 @@ void mark_page_accessed(struct page *page)
 		 * pagevec, mark it active and it'll be moved to the active
 		 * LRU on the next drain.
 		 */
+		/* 如果此页在lru链表中，将其移动到活动页lru链表头部 */
 		if (PageLRU(page))
 			activate_page(page);
 		else
+			/* 此页不在lru链表中，将其加入到lru_add_pvec这个pagevec中，这个pagevec在一定时候会将里面的所有页加入到活动页lru链表中 
+			 * 会设置page的PG_active
+			 */
 			__lru_cache_activate_page(page);
 		ClearPageReferenced(page);
+		/* 页是用于page cache */
 		if (page_is_file_cache(page))
+			/* zone->inactive_age++ */
 			workingset_activation(page);
 	} else if (!PageReferenced(page)) {
+		/* 设置此页最近被访问过 */
 		SetPageReferenced(page);
 	}
 }
 EXPORT_SYMBOL(mark_page_accessed);
 
+/* 加入到lru_add缓存中 */
 static void __lru_cache_add(struct page *page)
 {
-	/* 获取此CPU的lru缓存，是否会占有锁?后面有个put_cpu_var() */
+	/* 获取此CPU的lru缓存， */
 	struct pagevec *pvec = &get_cpu_var(lru_add_pvec);
 
 	/* 增加page的引用计数 */
@@ -815,7 +840,7 @@ void lru_add_drain_cpu(int cpu)
 	 */
 	struct pagevec *pvec = &per_cpu(lru_add_pvec, cpu);
 
-	/* 如果lru_add_pvec不为空，则将pagevec中的页放入lru链表中
+	/* 如果lru_add_pvec不为空，则将lru_add_pvec中的页放入lru链表中
 	 * 在lru_add_pvec中的页都是新的页，这些页刚加入，并不在lru链表中
 	 */
 	if (pagevec_count(pvec))
@@ -1048,6 +1073,7 @@ void lru_add_page_tail(struct page *page, struct page *page_tail,
 }
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
+/* 将lru_add缓存中的页加入到lru链表中 */
 static void __pagevec_lru_add_fn(struct page *page, struct lruvec *lruvec,
 				 void *arg)
 {
@@ -1057,7 +1083,7 @@ static void __pagevec_lru_add_fn(struct page *page, struct lruvec *lruvec,
 	 * 主要使用page的PG_active标志，此标志
 	 */
 	int active = PageActive(page);
-	/* 获取page所在的lru链表 */
+	/* 获取page所在的lru链表，里面会检测是映射页还是文件页，并且检查PG_active，最后能得出该page应该放到哪个lru链表中 */
 	enum lru_list lru = page_lru(page);
 
 	VM_BUG_ON_PAGE(PageLRU(page), page);

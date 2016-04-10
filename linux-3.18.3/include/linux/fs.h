@@ -394,26 +394,44 @@ int pagecache_write_end(struct file *, struct address_space *mapping,
 				struct page *page, void *fsdata);
 
 struct backing_dev_info;
-/* 当内核打开一个文件后，会生成一个struct inode，其中i_mapping指向一个struct address_space
+/* 如果当内核打开一个文件后，会生成一个struct inode，其中i_mapping指向一个struct address_space
+ * 但是并不只是可以用于inode，具体见ULK第15章
  * 一个文件可能在内存中有很多个页(分散)，这些页都会链接到同一个address_space中
  */
 struct address_space {
+	/* 所属inode */
 	struct inode		*host;		/* owner: inode, block_device */
+	/* 所属inode的所有页组成的基树的根 */
 	struct radix_tree_root	page_tree;	/* radix tree of all pages */
+	/* 基树的自旋锁 */
 	spinlock_t		tree_lock;	/* and lock protecting it */
+	/* 地址空间中共享内存映射的个数 */
 	atomic_t		i_mmap_writable;/* count VM_SHARED mappings */
+	/* 红黑树的根 */
 	struct rb_root		i_mmap;		/* tree of private and shared mappings */
+	/* 地址空间中非线性内存区的链表 */
 	struct list_head	i_mmap_nonlinear;/*list VM_NONLINEAR mappings */
+	/* 保护i_mmap这个红黑树的互斥锁 */
 	struct mutex		i_mmap_mutex;	/* protect tree, count, list */
 	/* Protected by tree_lock together with the radix tree */
+	/* 总共映射的页数量 */
 	unsigned long		nrpages;	/* number of total pages */
 	unsigned long		nrshadows;	/* number of shadow entries */
+	/* 最后一次回写操作所作用的页的索引 */
 	pgoff_t			writeback_index;/* writeback starts here */
+	/* 对页进行操作的操作集 */
 	const struct address_space_operations *a_ops;	/* methods */
+	/* 错误位和内存分配时用的标志
+	 * AS_UNEVICTABLE: 此address_space中的页都不能被换出
+	 */
 	unsigned long		flags;		/* error bits/gfp mask */
+	/* 指向inode所在的块设备的backing_dev_info */
 	struct backing_dev_info *backing_dev_info; /* device readahead, etc */
+	/* private_list的锁 */
 	spinlock_t		private_lock;	/* for use by the address_space */
+	/* 通常用作与inode相关的间接块的脏缓冲区的链表 */
 	struct list_head	private_list;	/* ditto */
+	/* 通常指向间接块所属块设备的address_space对象 */
 	void			*private_data;	/* ditto */
 } __attribute__((aligned(sizeof(long))));
 	/*

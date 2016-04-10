@@ -261,6 +261,7 @@ do {									\
  * Must be an lvalue. Since @var must be a simple identifier,
  * we force a syntax error here if it isn't.
  */
+/* 获取该CPU的变量var，会禁止抢占 */
 #define get_cpu_var(var)						\
 (*({									\
 	preempt_disable();						\
@@ -271,6 +272,7 @@ do {									\
  * The weird & is necessary because sparse considers (void)(var) to be
  * a direct dereference of percpu variable (var).
  */
+/* 开启抢占 */
 #define put_cpu_var(var)						\
 do {									\
 	(void)&(var);							\

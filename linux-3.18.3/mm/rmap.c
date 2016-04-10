@@ -767,6 +767,7 @@ static bool invalid_page_referenced_vma(struct vm_area_struct *vma, void *arg)
  * Quick test_and_clear_referenced for all mappings to a page,
  * returns the number of ptes which referenced the page.
  */
+/* 检查此page最近是否有被访问 */
 int page_referenced(struct page *page,
 		    int is_locked,
 		    struct mem_cgroup *memcg,
@@ -785,13 +786,17 @@ int page_referenced(struct page *page,
 	};
 
 	*vm_flags = 0;
+	/* 如果此页没有被映射，直接返回0 */
 	if (!page_mapped(page))
 		return 0;
 
+	/* 如果page的page->mapping没有指向一个address_space或者anon_vma，则返回0 */
 	if (!page_rmapping(page))
 		return 0;
 
+	/* 如果此页不是匿名页，并且用于KSM(内存合并)，并且没有上锁，则将其上锁 */
 	if (!is_locked && (!PageAnon(page) || PageKsm(page))) {
+		/* 设置page的PG_locked标志 */
 		we_locked = trylock_page(page);
 		if (!we_locked)
 			return 1;
@@ -1722,8 +1727,10 @@ int rmap_walk(struct page *page, struct rmap_walk_control *rwc)
 	if (unlikely(PageKsm(page)))
 		return rmap_walk_ksm(page, rwc);
 	else if (PageAnon(page))
+		/* 如果是匿名页 */
 		return rmap_walk_anon(page, rwc);
 	else
+		/* 如果是文件页 */
 		return rmap_walk_file(page, rwc);
 }
 

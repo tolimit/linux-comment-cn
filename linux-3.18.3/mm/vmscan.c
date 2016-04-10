@@ -165,6 +165,7 @@ static unsigned long zone_reclaimable_pages(struct zone *zone)
 	nr = zone_page_state(zone, NR_ACTIVE_FILE) +
 	     zone_page_state(zone, NR_INACTIVE_FILE);
 
+	/* 开启了swap的情况 */
 	if (get_nr_swap_pages() > 0)
 		nr += zone_page_state(zone, NR_ACTIVE_ANON) +
 		      zone_page_state(zone, NR_INACTIVE_ANON);
@@ -643,16 +644,22 @@ int remove_mapping(struct address_space *mapping, struct page *page)
  *
  * lru_lock must not be held, interrupts must be enabled.
  */
+/* 将页放入lru链表中，调用这个函数前提是此页必须不能在lru链表上 */
 void putback_lru_page(struct page *page)
 {
 	bool is_unevictable;
+	/* 获取此页是不是unevictable的页 */
 	int was_unevictable = PageUnevictable(page);
 
 	VM_BUG_ON_PAGE(PageLRU(page), page);
 
 redo:
+	/* 清除此页描述符的unevictable标志，上面已经获取了此标志，这里清除是用于下下个判断 */
 	ClearPageUnevictable(page);
 
+	/* 如果是evictable的，注意这里判断并不是通过页描述符的PageUnevictable标志进行判断，这个标志在上面已经被清除
+	 * 通过此页对应的address_space和此页的PG_mlock进行判断
+	 */
 	if (page_evictable(page)) {
 		/*
 		 * For evictable pages, we can use the cache.
@@ -661,8 +668,10 @@ redo:
 		 * We know how to handle that.
 		 */
 		is_unevictable = false;
+		/* 将页加入到lru_add这个lru缓存中，这个缓存中的页都是原来不在lru上，准备加入到lru链表中 */
 		lru_cache_add(page);
 	} else {
+		/* 是unevictable的，会将此页放入LRU_UNEVICTABLE链表，这个链表上的页不能被换出 */
 		/*
 		 * Put unevictable pages directly on zone's unevictable
 		 * list.
@@ -687,9 +696,13 @@ redo:
 	 * page is on unevictable list, it never be freed. To avoid that,
 	 * check after we added it to the list, again.
 	 */
+	/* 这里是检查一种情况，此页在上面加入到不可回收页的lru链表时，此页的状态发生了改变，变为可回收页了 */
 	if (is_unevictable && page_evictable(page)) {
+		/* 将此页从lru中拿出 */
 		if (!isolate_lru_page(page)) {
+			/* 释放此页的一个引用计数，在isolate_lru_page()中会增加一次，这里释放一次 */
 			put_page(page);
+			/* 然后再次重新将它放入lru */
 			goto redo;
 		}
 		/* This means someone else dropped this page from LRU
@@ -698,11 +711,12 @@ redo:
 		 */
 	}
 
+	/* 统计 */
 	if (was_unevictable && !is_unevictable)
 		count_vm_event(UNEVICTABLE_PGRESCUED);
 	else if (!was_unevictable && is_unevictable)
 		count_vm_event(UNEVICTABLE_PGCULLED);
-
+	/* 减少此页的引用计数 */
 	put_page(page);		/* drop ref from isolate */
 }
 
@@ -1185,7 +1199,7 @@ unsigned long reclaim_clean_pages_from_list(struct zone *zone,
  *
  * returns 0 on success, -ve errno on failure.
  */
-/* 将page从lru中拿出来 */
+/* 将page从lru中拿出来，这里更多的是设置其参数，比如清除PageLRU标志，并没有实际动作从lru中拿出此页 */
 int __isolate_lru_page(struct page *page, isolate_mode_t mode)
 {
 	int ret = -EINVAL;
@@ -1218,12 +1232,12 @@ int __isolate_lru_page(struct page *page, isolate_mode_t mode)
 		if (PageWriteback(page))
 			return ret;
 
-		/* 此页为脏页 */
+		/* 此页为脏页，匿名页也有脏页的说法，但匿名页是否放入swap cache才有脏页的说法 */
 		if (PageDirty(page)) {
 			struct address_space *mapping;
 
 			/* ISOLATE_CLEAN means only clean pages */
-			/* 要求只隔离干净的页，直接返回 */
+			/* mode中要求只隔离干净的页，直接返回 */
 			if (mode & ISOLATE_CLEAN)
 				return ret;
 
@@ -1231,6 +1245,9 @@ int __isolate_lru_page(struct page *page, isolate_mode_t mode)
 			 * Only pages without mappings or that have a
 			 * ->migratepage callback are possible to migrate
 			 * without blocking
+			 */
+			/* 获取此页对应的address_space结构，结构指向结构里的migratepage操作函数
+			 * 如果匿名页在swap cache里，migratepage函数为swap_aops->migrate_page
 			 */
 			mapping = page_mapping(page);
 			if (mapping && !mapping->a_ops->migratepage)
@@ -1289,6 +1306,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 	unsigned long nr_taken = 0;
 	unsigned long scan;
 
+	/* 扫描nr_to_scan次，默认是32 */
 	for (scan = 0; scan < nr_to_scan && !list_empty(src); scan++) {
 		struct page *page;
 		int nr_pages;
@@ -1300,7 +1318,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		/* 此页必须在lru中 */
 		VM_BUG_ON_PAGE(!PageLRU(page), page);
 
-		/* 将page从lru中拿出来 */
+		/* 将page从lru中拿出来，__isolate_lru_page更多的在page描述符做变量修改工作，描述此页已不在lru中，但没有实际从lru中拿出来，实际拿出来在后面的list_move */
 		switch (__isolate_lru_page(page, mode)) {
 		case 0:
 			/* 如果是透明大页，只有头page会被加入到lru，这里计算透明大页用了多少个page，如果是常规页则为1 */
@@ -1355,22 +1373,30 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
  * (2) the lru_lock must not be held.
  * (3) interrupts must be enabled.
  */
+/* 将page从lru中拿出来 */
 int isolate_lru_page(struct page *page)
 {
 	int ret = -EBUSY;
 
+	/* 此页的引用计数必须大于0 */
 	VM_BUG_ON_PAGE(!page_count(page), page);
 
 	if (PageLRU(page)) {
+		/* 页所在的管理区 */
 		struct zone *zone = page_zone(page);
 		struct lruvec *lruvec;
 
 		spin_lock_irq(&zone->lru_lock);
+		/* 根据管理区获取管理区的lru链表 */
 		lruvec = mem_cgroup_page_lruvec(page, zone);
 		if (PageLRU(page)) {
+			/* 获取此页应该放置的lru链表的类型 */
 			int lru = page_lru(page);
+			/* 增加此页的引用计数 */
 			get_page(page);
+			/* 清除此页在lru的标志 */
 			ClearPageLRU(page);
+			/* 将此页从lru拿出来 */
 			del_page_from_lru_list(page, lruvec, lru);
 			ret = 0;
 		}
@@ -1651,52 +1677,75 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
  * But we had to alter page->flags anyway.
  */
 
+/* 将list链表中的页放入到lruvec->lists[lru]链表中，不需要放入的页放到pages_to_free链表中
+ * 会清除PG_active标志
+ */
 static void move_active_pages_to_lru(struct lruvec *lruvec,
 				     struct list_head *list,
 				     struct list_head *pages_to_free,
 				     enum lru_list lru)
 {
+	/* 根据lruvec获取对应的zone管理区 */
 	struct zone *zone = lruvec_zone(lruvec);
 	unsigned long pgmoved = 0;
 	struct page *page;
 	int nr_pages;
 
+	/* 遍历list中每一个页描述符 */
 	while (!list_empty(list)) {
+		/* 从list末尾获取一个页描述符 */
 		page = lru_to_page(list);
+		/* 获取对应的lruvec，是否会有情况导致这里获取的lruvec与传入的lruvec不一致?一般情况是一致的 */
 		lruvec = mem_cgroup_page_lruvec(page, zone);
 
+		/* 如果page在LRU链表上，则提示一个BUG，这时page应该在list上，而list不应该是lru中的一个链表 */
 		VM_BUG_ON_PAGE(PageLRU(page), page);
+		/* 设置page标志其在lru上 */
 		SetPageLRU(page);
 
+		/* 如果页描述符描述的是一个大页，获取其对应的多少个正常页，比如2M大页，那正常页则是512个 */
 		nr_pages = hpage_nr_pages(page);
+		/* 更新链表中lruvec->lists[lru]中的计数 */
 		mem_cgroup_update_lru_size(lruvec, lru, nr_pages);
+		/* 将页描述符移动到lruvec->lists[lru]上 */
 		list_move(&page->lru, &lruvec->lists[lru]);
+		/* 计数器 */
 		pgmoved += nr_pages;
 
+		/* 如果此页的引用次数为1，则将其放到page_to_free中，之后会准备释放 */
 		if (put_page_testzero(page)) {
+			/* 清除在lru中的标志 */
 			__ClearPageLRU(page);
+			/* 清除此页是活动页的标志 */
 			__ClearPageActive(page);
+			/* 将其从lru中移除，并会减少统计 */
 			del_page_from_lru_list(page, lruvec, lru);
 
+			/* 如果是大页 */
 			if (unlikely(PageCompound(page))) {
 				spin_unlock_irq(&zone->lru_lock);
 				mem_cgroup_uncharge(page);
 				(*get_compound_page_dtor(page))(page);
 				spin_lock_irq(&zone->lru_lock);
 			} else
+				/* 不是大页的情况，加入到pages_to_free链表中 */
 				list_add(&page->lru, pages_to_free);
 		}
 	}
+	/* 统计，这里注意，当一些页又从lru中移除的时候，并没有减少pgmoved计数，因为调用del_page_from_lru_list时已经先减掉了移除的页 */
 	__mod_zone_page_state(zone, NR_LRU_BASE + lru, pgmoved);
+	/* 如果目标lru并不是activate的lru，这里也要统计 */
 	if (!is_active_lru(lru))
 		__count_vm_events(PGDEACTIVATE, pgmoved);
 }
 
 /*
- * nr_to_scan: 默认是32
+ * 从lruvec中的lru类型的链表中获取一些页，并移动到inactive的lru链表，注意此函数会以lru参数为类型，比如lru参数为LRU_ACTIVE_ANON，那只会处理ANON类型的页，不会处理FILE类型的页
+ * 从lruvec中的lru类型的链表中拿出一些页之后，会判断这些页的去处，然后将page->_count=1的页进行释放，释放到伙伴系统的每CPU高速缓存中
+ * nr_to_scan: 默认是32，扫描次数，如果扫描的全是普通页，那最多扫描32个页，如果全是大页，最多扫描(大页/普通页)*32个页
  * lruvec: 需要扫描的lru链表(里面包括一个zone中所有类型的lru链表)
  * sc: 扫描控制结构
- * lru: 需要扫描的类型
+ * lru: 需要扫描的类型，一般都为active_file或者active_anon
  */
 static void shrink_active_list(unsigned long nr_to_scan,
 			       struct lruvec *lruvec,
@@ -1706,8 +1755,11 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	unsigned long nr_taken;
 	unsigned long nr_scanned;
 	unsigned long vm_flags;
+	/* 从lru中获取到的页存放在这，到最后这里面还有剩余的页的话，就把它们释放回伙伴系统 */
 	LIST_HEAD(l_hold);	/* The pages which were snipped off */
+	/* 返回active的页放在这，一般当内存压力较小时，会将代码段的页放到这 */
 	LIST_HEAD(l_active);
+	/* 将要移动到inactive的页放在这 */
 	LIST_HEAD(l_inactive);
 	struct page *page;
 	/* 统计结构 */
@@ -1732,6 +1784,10 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	/* 上锁 */
 	spin_lock_irq(&zone->lru_lock);
 
+	/* 将lruvec中lru类型链表中的一些页隔离出来，放入到l_hold中，lru类型一般是LRU_ACTIVE_ANON或LRU_ACTIVE_FILE
+	 * 也就是从活动的lru链表中隔离出一些页，从活动的lru链表的尾部依次拿出
+	 * nr_taken保存拿出的页的数量
+	 */
 	nr_taken = isolate_lru_pages(nr_to_scan, lruvec, &l_hold,
 				     &nr_scanned, sc, isolate_mode, lru);
 	if (global_reclaim(sc))
@@ -1739,21 +1795,29 @@ static void shrink_active_list(unsigned long nr_to_scan,
 
 	reclaim_stat->recent_scanned[file] += nr_taken;
 
+	/* 做统计 */
 	__count_zone_vm_events(PGREFILL, zone, nr_scanned);
 	__mod_zone_page_state(zone, NR_LRU_BASE + lru, -nr_taken);
 	__mod_zone_page_state(zone, NR_ISOLATED_ANON + file, nr_taken);
+	/* 释放lru链表锁 */
 	spin_unlock_irq(&zone->lru_lock);
 
+	/* 将l_hold中的页一个一个处理 */
 	while (!list_empty(&l_hold)) {
+		/* 是否需要调度，需要则调度 */
 		cond_resched();
+		/* 将页从l_hold中拿出来 */
 		page = lru_to_page(&l_hold);
 		list_del(&page->lru);
 
+		/* 如果页是unevictable(不可回收)的，则放回到LRU_UNEVICTABLE这个lru链表中，这个lru链表中的页不能被交换出去 */
 		if (unlikely(!page_evictable(page))) {
+			/* 放回到page所应该属于的lru链表中 */
 			putback_lru_page(page);
 			continue;
 		}
 
+		/* buffer_heads的数量超过了结点允许的最大值的情况 */
 		if (unlikely(buffer_heads_over_limit)) {
 			if (page_has_private(page) && trylock_page(page)) {
 				if (page_has_private(page))
@@ -1762,8 +1826,10 @@ static void shrink_active_list(unsigned long nr_to_scan,
 			}
 		}
 
+		/* 检查此页面最近是否有被访问过，需要细看 */
 		if (page_referenced(page, 0, sc->target_mem_cgroup,
 				    &vm_flags)) {
+			/* 如果是大页，则记录一共多少个页 */
 			nr_rotated += hpage_nr_pages(page);
 			/*
 			 * Identify referenced, file-backed active pages and
@@ -1774,12 +1840,15 @@ static void shrink_active_list(unsigned long nr_to_scan,
 			 * IO, plus JVM can create lots of anon VM_EXEC pages,
 			 * so we ignore them here.
 			 */
+			/* 如果此页是文件页，并且映射的是代码段，则将其放到l_active链表中
+			 * 在内存压力不大的情况下，一般不把代码段中的页换出，让他们保留在内存中
+			 */
 			if ((vm_flags & VM_EXEC) && page_is_file_cache(page)) {
 				list_add(&page->lru, &l_active);
 				continue;
 			}
 		}
-
+		/* 将页放到l_inactive链表中，如果最近有被访问过的情况也需要放入到l_inactive链表 */
 		ClearPageActive(page);	/* we are de-activating */
 		list_add(&page->lru, &l_inactive);
 	}
@@ -1794,14 +1863,18 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	 * helps balance scan pressure between file and anonymous pages in
 	 * get_scan_count.
 	 */
+	/* 记录的是最近有被访问过的页的数量，之后这些页有可能会又被返回到active链表 */
 	reclaim_stat->recent_rotated[file] += nr_rotated;
 
+	/* 将l_active链表中的页移动到lruvec->lists[lru]中，这里是将active的页返回到active的lru中 */
 	move_active_pages_to_lru(lruvec, &l_active, &l_hold, lru);
+	/* 将l_inactive链表中的页移动到lruvec->lists[lru - LRU_ACITVE]中，这里是将active的页移动到inactive的lru中 */
 	move_active_pages_to_lru(lruvec, &l_inactive, &l_hold, lru - LRU_ACTIVE);
 	__mod_zone_page_state(zone, NR_ISOLATED_ANON + file, -nr_taken);
 	spin_unlock_irq(&zone->lru_lock);
 
 	mem_cgroup_uncharge_list(&l_hold);
+	/* 剩下的页的处理，作为冷页放回到伙伴系统的每CPU单页框高速缓存中，这里的页都是page->_count为1的页 */
 	free_hot_cold_page_list(&l_hold, true);
 }
 
@@ -2836,6 +2909,7 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 }
 #endif
 
+/* 将active_anon这个lru链表中的页拿出一些放到inactive_anon中，但并不一定拿多少放多少，还需要一些判断 */
 static void age_active_anon(struct zone *zone, struct scan_control *sc)
 {
 	struct mem_cgroup *memcg;
@@ -2859,6 +2933,7 @@ static void age_active_anon(struct zone *zone, struct scan_control *sc)
 			shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
 					   sc, LRU_ACTIVE_ANON);
 
+		/* 下一个memcg */
 		memcg = mem_cgroup_iter(NULL, memcg, NULL);
 	} while (memcg);
 }
@@ -3145,7 +3220,9 @@ static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 			 * Do some background aging of the anon list, to give
 			 * pages a chance to be referenced before reclaiming.
 			 */
-			/* 更新匿名页的活动lru链表，匿名页主要是进程的堆和栈 */
+			/* 更新非活动匿名页lru链表，匿名页主要是进程的堆和栈
+			 * 这里主要判断非活动匿名页lru链表中页数量是否过少，过少的情况下则从活动匿名页lru链表拿出一些页放入非活动匿名页lru链表
+			 */
 			age_active_anon(zone, &sc);
 
 			/*
@@ -3197,7 +3274,9 @@ static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 			 * not call compaction as it is expected that the
 			 * necessary pages are already available.
 			 */
-			/* pgdat_needs_compaction = order，如果有任何一个管理区减去2的order次方数量的页框后页框数量还大于低阀值，则将pgdat_needs_compaction设置为false */
+			/* pgdat_needs_compaction = order，如果有任何一个管理区减去2的order次方数量的页框后页框数量还大于低阀值，则将pgdat_needs_compaction设置为false
+			 * pgdat_needs_compaction代表是否需要内存压缩
+			 */
 			if (pgdat_needs_compaction &&
 					zone_watermark_ok(zone, order,
 						low_wmark_pages(zone),

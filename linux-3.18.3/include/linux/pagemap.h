@@ -388,9 +388,11 @@ static inline struct page *read_mapping_page(struct address_space *mapping,
  */
 static inline pgoff_t page_to_pgoff(struct page *page)
 {
+	/* 大页的情况 */
 	if (unlikely(PageHeadHuge(page)))
 		return page->index << compound_order(page);
 	else
+		/* 正常页的情况 */
 		return page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
 }
 

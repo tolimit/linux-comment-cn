@@ -59,6 +59,9 @@ typedef void (bh_end_io_t)(struct buffer_head *bh, int uptodate);
  * a page (via a page_mapping) and for wrapping bio submission
  * for backward compatibility reasons (e.g. submit_bh).
  */
+/* 用于描述一个buffer cache，代表一个或多个磁盘物理扇区，默认是4k
+ * 一个或多个buffer cache组成4k放入一个page cache中。
+ */
 struct buffer_head {
 	unsigned long b_state;		/* buffer state bitmap (see above) */
 	struct buffer_head *b_this_page;/* circular list of page's buffers */

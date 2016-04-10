@@ -184,6 +184,11 @@ enum lru_list {
 	LRU_ACTIVE_ANON = LRU_BASE + LRU_ACTIVE,
 	LRU_INACTIVE_FILE = LRU_BASE + LRU_FILE,
 	LRU_ACTIVE_FILE = LRU_BASE + LRU_FILE + LRU_ACTIVE,
+	/* 不可回收页链表，里面的页不能交换出去，这里面的页有三种可能性
+	 * 1.属于ramfs的页
+	 * 2.共享内存时使用了SHM_LOCK标志
+	 * 3.映射时使用了mlock()
+	 */
 	LRU_UNEVICTABLE,
 	NR_LRU_LISTS
 };
@@ -218,6 +223,7 @@ struct zone_reclaim_stat {
 	 */
 	/* rotated用于活动链表? */
 	unsigned long		recent_rotated[2];
+	/* 最近扫描的页数量，或者是总体的页数量 */
 	unsigned long		recent_scanned[2];
 };
 
@@ -548,6 +554,7 @@ struct zone {
 	struct lruvec		lruvec;
 
 	/* Evictions & activations on the inactive file list */
+	/* 在lru_inacitve_file链表上的页移动到lru_activate_file或者回收时需要的访问次数 */
 	atomic_long_t		inactive_age;
 
 	/*
