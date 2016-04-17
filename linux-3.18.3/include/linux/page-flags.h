@@ -75,7 +75,7 @@ enum pageflags {
 	PG_locked,		/* 页被锁定，例如，在磁盘IO操作中涉及的页 */
 	PG_error, 		/* 在传输页时发生IO错误 */
 	PG_referenced, 	/* 刚刚访问完的页 */
-	PG_uptodate, 	/* 在完成读操作后置位，除非发生磁盘IO错误 */
+	PG_uptodate, 	/* 用于表示此页是最新的，1.成功从磁盘读入，在完成读操作后置位，除非发生磁盘IO错误 2.写时复制或者第一次访问页时，获得一个新分配的页，也会对此页置此位 */
 	PG_dirty, 		/* 页已经被修改 */
 	PG_lru, 			/* 页在活动或非活动页链表中 */
 	PG_active, 		/* 页在活动页链表中 */
@@ -90,7 +90,7 @@ enum pageflags {
 	PG_head,		/* A head page */
 	PG_tail,		/* A tail page */
 #else
-	PG_compound,		/* 通过扩展分页机制处理页框 */
+	PG_compound,		/* 通过扩展分页机制(PAE)处理页框 */
 #endif
 	PG_swapcache,		/* 页属于对换高速缓存 */
 	PG_mappedtodisk,	/* 页框中的所有数据对应于磁盘上分配的块 */

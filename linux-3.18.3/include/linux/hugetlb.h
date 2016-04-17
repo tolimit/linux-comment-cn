@@ -245,7 +245,7 @@ unsigned long hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
 
 #define HSTATE_NAME_LEN 32
 /* Defines one hugetlb page size */
-/* 描述一种大页大小 */
+/* 描述一种大小大页，所有不同大小的大页的hstate都放在hstates[hugetlb_max_hstate]数组中 */
 struct hstate {
 	int next_nid_to_alloc;
 	int next_nid_to_free;

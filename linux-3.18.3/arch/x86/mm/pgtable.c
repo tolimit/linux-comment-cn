@@ -276,7 +276,10 @@ static void pgd_prepopulate_pmd(struct mm_struct *mm, pgd_t *pgd, pmd_t *pmds[])
 	}
 }
 
-/* mm指向子进程的struct mm_struct */
+/* 
+ * 分配一页物理页框用于此进程的页全局目录，并复制内核页表中的页全局目录项到此页全局目录中
+ * mm指向子进程的struct mm_struct 
+ */
 pgd_t *pgd_alloc(struct mm_struct *mm)
 {
 	/* 页目录指针 */
@@ -294,7 +297,7 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
 	/* 设置struct mm_struct中的pgd指向新的页目录，之前是指向父进程的页目录 */
 	mm->pgd = pgd;
 
-	/* 预分配页中间目录，正常情况下不会预分配 */
+	/* 预分配页中间目录，PAE下使用 */
 	if (preallocate_pmds(pmds) != 0)
 		goto out_free_pgd;
 
@@ -309,9 +312,9 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
 	 */
 	spin_lock(&pgd_lock);
 
-	/* 子进程的页目录项设置，主要设置了内核地址空间的页目录项 */
+	/* 子进程的页全局目录项设置，主要设置了内核地址空间的页全局目录项，指向所有内核地址空间共用的页上级目录 */
 	pgd_ctor(mm, pgd);
-	/* 子进程的页中间目录项设置，也是主要设置了内核地址空间的页中间目录项，如果没有预分配页中间目录，则直接返回 */
+	/* PAE下使用，子进程的页中间目录项设置，也是主要设置了内核地址空间的页中间目录项，如果没有预分配页中间目录，则直接返回 */
 	pgd_prepopulate_pmd(mm, pgd, pmds);
 
 	spin_unlock(&pgd_lock);

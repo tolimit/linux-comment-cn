@@ -845,11 +845,14 @@ static void update_and_free_page(struct hstate *h, struct page *page)
 	}
 }
 
+/* 根据size获取对应大小大页的struct hstate */
 struct hstate *size_to_hstate(unsigned long size)
 {
 	struct hstate *h;
 
+	/* 遍历hstates[hugetlb_max_hstate]数组 */
 	for_each_hstate(h) {
+		/* (PAGE_SIZE << h->order) == size */
 		if (huge_page_size(h) == size)
 			return h;
 	}

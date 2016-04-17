@@ -6,19 +6,27 @@
  Based on: asm-xxx/mman.h
 */
 
+/* 页内容可以被读取 */
 #define PROT_READ	0x1		/* page can be read */
+/* 页可以被写入 */
 #define PROT_WRITE	0x2		/* page can be written */
+/* 页内容可以被指向 */
 #define PROT_EXEC	0x4		/* page can be executed */
+/* 页用于原子操作 */
 #define PROT_SEM	0x8		/* page may be used for atomic ops */
+/* 页不可访问 */
 #define PROT_NONE	0x0		/* page can not be accessed */
 #define PROT_GROWSDOWN	0x01000000	/* mprotect flag: extend change to start of growsdown vma */
 #define PROT_GROWSUP	0x02000000	/* mprotect flag: extend change to end of growsup vma */
-
-#define MAP_SHARED	0x01		/* 线性区的页可以被几个进程共享 */
-#define MAP_PRIVATE	0x02		/* 线性区的页不能被进程共享 */
+/* 线性区的页可以被几个进程共享 */
+#define MAP_SHARED	0x01	
+/* 线性区的页不能被进程共享，但是在fork时，子进程会继承此匿名页线性区，并会进行写时复制 */
+#define MAP_PRIVATE	0x02	
 #define MAP_TYPE	0x0f		/* Mask for type of mapping */
-#define MAP_FIXED	0x10		/* 区间的起始地址必须是由参数addr所指定 */
-#define MAP_ANONYMOUS	0x20		/* 没有文件与这个线性区相关联 */
+/* 区间的起始地址必须是由参数addr所指定 */
+#define MAP_FIXED	0x10		
+/* 建立匿名映射。此时会忽略参数fd，不涉及文件，而且映射区域无法和其他进程共享。可以与有亲属关系的进程共享 */
+#define MAP_ANONYMOUS	0x20		
 #ifdef CONFIG_MMAP_ALLOW_UNINITIALIZED
 # define MAP_UNINITIALIZED 0x4000000	/* For anonymous mmap, memory could be uninitialized */
 #else

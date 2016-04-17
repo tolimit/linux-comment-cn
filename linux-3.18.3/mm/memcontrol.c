@@ -1426,6 +1426,7 @@ out:
  * This function must be called when a page is added to or removed from an
  * lru list.
  */
+/* 更新lruvec中lru类型的链表的page数量 */
 void mem_cgroup_update_lru_size(struct lruvec *lruvec, enum lru_list lru,
 				int nr_pages)
 {

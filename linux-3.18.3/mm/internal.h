@@ -45,6 +45,7 @@ static inline void set_page_refcounted(struct page *page)
 {
 	VM_BUG_ON_PAGE(PageTail(page), page);
 	VM_BUG_ON_PAGE(atomic_read(&page->_count), page);
+	/* ÉèÖÃpage->_count = 1 */
 	set_page_count(page, 1);
 }
 

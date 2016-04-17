@@ -259,11 +259,15 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	unsigned long populate;
 
+	/* 安全检查 */
 	ret = security_mmap_file(file, prot, flag);
 	if (!ret) {
+		/* 通过了安全检查，首先获取此进行的内存描述符中的线性区读写信号量中的写锁 */
 		down_write(&mm->mmap_sem);
+		/* 做映射 */
 		ret = do_mmap_pgoff(file, addr, len, prot, flag, pgoff,
 				    &populate);
+		/* 释放写锁 */
 		up_write(&mm->mmap_sem);
 		if (populate)
 			mm_populate(ret, populate);

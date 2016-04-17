@@ -647,6 +647,9 @@ static struct file *__fget(unsigned int fd, fmode_t mask)
 	return file;
 }
 
+/* 根据fd获取对应的struct file结构
+ * 会与当前进程有关
+ */
 struct file *fget(unsigned int fd)
 {
 	return __fget(fd, FMODE_PATH);

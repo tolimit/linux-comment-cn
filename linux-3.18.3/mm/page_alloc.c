@@ -482,15 +482,21 @@ static inline void rmv_page_order(struct page *page)
  *
  * For recording page's order, we use page_private(page).
  */
+/* 
+ * 返回0说明page和buddy不能够合并
+ * 返回1说明page和buddy可以合并
+ */
 static inline int page_is_buddy(struct page *page, struct page *buddy,
 							unsigned int order)
 {
+	/* 检查buddy对应的pfnid是否有效 */
 	if (!pfn_valid_within(page_to_pfn(buddy)))
 		return 0;
 
 	if (page_is_guard(buddy) && page_order(buddy) == order) {
 		VM_BUG_ON_PAGE(page_count(buddy) != 0, buddy);
 
+		/* 检查page和buddy是否处于同一个zone */
 		if (page_zone_id(page) != page_zone_id(buddy))
 			return 0;
 
@@ -505,6 +511,7 @@ static inline int page_is_buddy(struct page *page, struct page *buddy,
 		 * calculating zone/node ids for pages that could
 		 * never merge.
 		 */
+		/* 检查是否属于同一个zone */
 		if (page_zone_id(page) != page_zone_id(buddy))
 			return 0;
 
@@ -576,7 +583,7 @@ static inline void __free_one_page(struct page *page,
 	VM_BUG_ON_PAGE(page_idx & ((1 << order) - 1), page);
 	VM_BUG_ON_PAGE(bad_range(zone, page), page);
 
-	/* 主要，最多循环10次，每次都尽量把一个块和它的伙伴进行合并，以最小块开始 */
+	/* 主要，最多循环9次，每次都尽量把一个块和它的伙伴进行合并，以最小块开始 */
 	while (order < max_order - 1) {
 		/* buddy_idx = page_idx ^ (1 << order) */
 		/* buddy_idx是page_idx的伙伴的页框号 */
@@ -598,16 +605,23 @@ static inline void __free_one_page(struct page *page,
 		/* 伙伴的页描述符，就是buddy_idx对应的页描述符 */
 		buddy = page + (buddy_idx - page_idx);
 		
-		/* 检查buddy是否描述了大小为order的空闲页框块的第一个页 */
+		/* 检查buddy与page是否是伙伴，并且检查buddy是否是大小为2^order个空闲页框块的第一个页
+		 * 如果是，说明这个buddy是可以进行合并的，否则跳出
+		 */
 		if (!page_is_buddy(page, buddy, order))
 			break;
 		/*
 		 * Our buddy is free or it is CONFIG_DEBUG_PAGEALLOC guard page,
 		 * merge with it and move up one order.
 		 */
+		/* 以下是找到的buddy是可以进行合并的情况才会执行 */
+		
 		if (page_is_guard(buddy)) {
-			/* 设置了PAGE_DEBUG_FLAG_GUARD */
+			/* 设置了PAGE_DEBUG_FLAG_GUARD的情况 */
+
+			/* 清除PAGE_DEBUG_FLAG_GUARD位 */
 			clear_page_guard_flag(buddy);
+			/* 清空伙伴的buddy的private，这个private用于保存在伙伴系统中的连续页框的order值 */
 			set_page_private(buddy, 0);
 			if (!is_migrate_isolate(migratetype)) {
 				__mod_zone_freepage_state(zone, 1 << order,
@@ -616,17 +630,24 @@ static inline void __free_one_page(struct page *page,
 		} else {
 			/* 将伙伴从当前空闲链表中移除出来 */
 			list_del(&buddy->lru);
+			/* 此order的连续页框块数量-- */
 			zone->free_area[order].nr_free--;
+			/* 设置page->_mapcount = -1 并且 page->private = 0
+			 * _mapcount说明此页框空闲的，没有被使用，private在空闲的页框中用于表示连续页框的order值，这里也清空，后面会在这段连续页框块的第一个page中设置
+			 */
 			rmv_page_order(buddy);
 		}
 		/* combined_idx 是 buddy_idx 与 page_idx 中最小的那个idx */
 		combined_idx = buddy_idx & page_idx;
+		/* 这里会获得合并后的连续页框块的第一个page的描述符 */
 		page = page + (combined_idx - page_idx);
+		/* 这块合并好的连续页框块的第一个page的ID */
 		page_idx = combined_idx;
+		/* order++，继续尝试进行合并 */
 		order++;
 	}
+	/* 循环结束，已经不能够继续进行合并了，这时候会对这块连续页框块的第一个page设置order值，设置在page->private中 */
 	set_page_order(page, order);
-	/* 循环结束，标记了释放的连续page已经和之后的连续页形成了一个2的order次方的连续页框块 */
 	
 	/*
 	 * If this is not the largest possible page, check if the buddy
@@ -636,14 +657,25 @@ static inline void __free_one_page(struct page *page,
 	 * so it's less likely to be used soon and more likely to be merged
 	 * as a higher order page
 	 */
-	/* 检查能否再进一步合并 */
+	/* 这里会检查能否再进一步合并，因为上面的循环最多只能将order合并到9，而order最大能到10，但是这里只是检查能否合并，如果能够合并，也没有进行合并 */
 	if ((order < MAX_ORDER-2) && pfn_valid_within(page_to_pfn(buddy))) {
 		struct page *higher_page, *higher_buddy;
+		/* combined_idx 是 buddy_idx 与 page_idx 中最小的那个idx
+		 * 从上面看下来，应该就等于page_idx
+		 */
 		combined_idx = buddy_idx & page_idx;
+		/* 这里就是page的描述符，combined_idx == page_idx */
 		higher_page = page + (combined_idx - page_idx);
+		/* 找到order+1的伙伴 */
 		buddy_idx = __find_buddy_index(combined_idx, order + 1);
+		/* 获取buddy_idx对应的页描述符 */
 		higher_buddy = higher_page + (buddy_idx - combined_idx);
+		/* 检查higher_buddy与higher_page是否是伙伴，并且检查higher_buddy是否是大小为2^order个空闲页框块的第一个页
+		 * 如果是，说明这个higher_buddy是可以进行合并的，否则跳出
+		 * 这里比较奇怪，检查的是order+1，而page的order是order，并不是order+1
+		 */
 		if (page_is_buddy(higher_page, higher_buddy, order + 1)) {
+			/* 加入到zone管理区order链表的尾部 */
 			list_add_tail(&page->lru,
 				&zone->free_area[order].free_list[migratetype]);
 			goto out;
@@ -836,8 +868,9 @@ static void __free_pages_ok(struct page *page, unsigned int order)
 	local_irq_save(flags);
 	/* 统计当前CPU一共释放的页框数 */
 	__count_vm_events(PGFREE, 1 << order);
-	/* page->index = migratetype */
+	/* 设置这块连续页框块的类型与所在pageblock类型一致，保存在page->index中 */
 	set_freepage_migratetype(page, migratetype);
+	/* 释放函数 */
 	free_one_page(page_zone(page), page, pfn, order, migratetype);
 	local_irq_restore(flags);
 }
@@ -967,10 +1000,13 @@ static inline int check_new_page(struct page *page)
 	const char *bad_reason = NULL;
 	unsigned long bad_flags = 0;
 
+	/* page->_mapcount = -1为空闲页，这里返回的是page->_mapcount + 1 */
 	if (unlikely(page_mapcount(page)))
 		bad_reason = "nonzero mapcount";
+	/* page->mapping用于当页作为映射页或者匿名页时，指向struct address_space或者struct anon_vma */
 	if (unlikely(page->mapping != NULL))
 		bad_reason = "non-NULL mapping";
+	/* 页框的引用计数，如果为-1，则此页框空闲，并可分配给任一进程或内核；如果大于或等于0，则说明页框被分配给了一个或多个进程，或用于存放内核数据。page_count()返回_count加1的值，也就是该页的使用者数目 */
 	if (unlikely(atomic_read(&page->_count) != 0))
 		bad_reason = "nonzero _count";
 	if (unlikely(page->flags & PAGE_FLAGS_CHECK_AT_PREP)) {
@@ -986,25 +1022,32 @@ static inline int check_new_page(struct page *page)
 	return 0;
 }
 
+/* 对新的页框进行一些参数的设置和操作 */
 static int prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags)
 {
 	int i;
 
+	/* 遍历每个页，对每个页进行检查 */
 	for (i = 0; i < (1 << order); i++) {
 		struct page *p = page + i;
 		if (unlikely(check_new_page(p)))
 			return 1;
 	}
 
+	/* 设置page->private = 0 */
 	set_page_private(page, 0);
+	/* 设置page->_count = 1 */
 	set_page_refcounted(page);
 
 	arch_alloc_page(page, order);
+	/* 如果是低端内存，需要对其进行处理 */
 	kernel_map_pages(page, 1 << order, 1);
 
+	/* 如果需要对页清0，则调用prep_zero_page()对页进行清0 */
 	if (gfp_flags & __GFP_ZERO)
 		prep_zero_page(page, order, gfp_flags);
 
+	/* 启用PAE扩展分页机制获取的页框 */
 	if (order && (gfp_flags & __GFP_COMP))
 		prep_compound_page(page, order);
 
@@ -1807,7 +1850,7 @@ again:
 	local_irq_restore(flags);
 
 	VM_BUG_ON_PAGE(bad_range(zone, page), page);
-	/* 检查所有分配的连续页框是否为空闲页 */
+	/* 检查所有分配的连续页框是否为空闲页，并对新的页框进行一定的处理 */
 	if (prep_new_page(page, order, gfp_flags))
 		goto again;
 	/* 返回第一个页描述符 */
@@ -3172,6 +3215,7 @@ void __free_pages(struct page *page, unsigned int order)
 		if (order == 0)
 			free_hot_cold_page(page, false);
 		else
+			/* 释放连续页框，页框数量是从page开始的2^order个 */
 			__free_pages_ok(page, order);
 	}
 }

@@ -240,7 +240,21 @@ extern long long virt_phys_offset;
 #endif
 
 /* align addr on a size boundary - adjust address up/down if needed */
+/* - -------- <- addr按size对齐的下一个地址
+ *   |      |
+ *   |      |
+ * s |      |
+ * i |      |
+ * z |------| <- addr
+ * e |      |
+ *   |      |
+ *   |      |
+ *   |      |
+ * - -------- <- addr按size对齐的上一个地址
+ */
+/* 计算出addr按照size对齐的下一个地址 */
 #define _ALIGN_UP(addr,size)	(((addr)+((size)-1))&(~((size)-1)))
+/* 计算出addr按照size对齐的上一个地址 */
 #define _ALIGN_DOWN(addr,size)	((addr)&(~((size)-1)))
 
 /* align addr on a size boundary - adjust address up if needed */

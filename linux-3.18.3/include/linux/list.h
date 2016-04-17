@@ -228,6 +228,7 @@ static inline void list_rotate_left(struct list_head *head)
  */
 static inline int list_is_singular(const struct list_head *head)
 {
+	/* head不为空，并且head只有一个节点*/
 	return !list_empty(head) && (head->next == head->prev);
 }
 

@@ -506,20 +506,29 @@ static void update_page_reclaim_stat(struct lruvec *lruvec,
 		reclaim_stat->recent_rotated[file]++;
 }
 
+/* 设置页为活动页，并加入到对应的活动页lru链表中 */
 static void __activate_page(struct page *page, struct lruvec *lruvec,
 			    void *arg)
 {
 	if (PageLRU(page) && !PageActive(page) && !PageUnevictable(page)) {
+		/* 是否为映射页 */
 		int file = page_is_file_cache(page);
+		/* 获取lru类型 */
 		int lru = page_lru_base_type(page);
-
+		/* 将此页从lru链表中移除 */
 		del_page_from_lru_list(page, lruvec, lru);
+		/* 设置page的PG_active标志，此标志说明此页在活动页的lru链表中 */
 		SetPageActive(page);
+		/* 获取类型，lru在这里一般是lru_inactive_file或者lru_inactive_anon
+		 * 加上LRU_ACTIVE就变成了lru_active_file或者lru_active_anon
+		 */
 		lru += LRU_ACTIVE;
+		/* 将此页加入到活动页lru链表中 */
 		add_page_to_lru_list(page, lruvec, lru);
 		trace_mm_lru_activate(page);
 
 		__count_vm_event(PGACTIVATE);
+		/* 更新lruvec中zone_reclaim_stat->recent_scanned[file]++和zone_reclaim_stat->recent_rotated[file]++ */
 		update_page_reclaim_stat(lruvec, file, 1);
 	}
 }
@@ -560,6 +569,7 @@ static bool need_activate_page_drain(int cpu)
 	return false;
 }
 
+/* 设置页为活动页，并加入到对应的活动页lru链表中 */
 void activate_page(struct page *page)
 {
 	struct zone *zone = page_zone(page);
@@ -607,8 +617,9 @@ static void __lru_cache_activate_page(struct page *page)
  * When a newly allocated page is not yet visible, so safe for non-atomic ops,
  * __SetPageReferenced(page) may be substituted for mark_page_accessed(page).
  */
-/* 标记此页最近被访问过，如果此页在lru链表中，则移动到活动页lru链表头，如果不在lru链表中，则加入到lru_add_pvec准备加入活动lru链表
- * 注意: 只有在页的PG_referenced置位了，这里面才会将页放到活动页lru链表
+/* 标记此页最近被访问过，如果此页为非活动页，并且最近有被访问过(PG_referenced已经被置位)，则将此页移动到活动页lru链表中
+ * 注意: 只有在页的PG_referenced置位了，这里面才会将页放到活动页lru链表，因为第一次访问此页时，会设置PG_referenced标志，表明此页最近被访问过，
+ * 但是这个页仍留在非活动lru链表中，第二次访问时发现此页的PG_referenced已经被置位，才将此页移动到活动页lru链表中
  * 此函数调用位置:
  * 1.当此页被作为进程的一个匿名页时(do_anonymous_page())
  * 2.当此页被用于映射文件时(filemap_nopage())
@@ -619,6 +630,7 @@ static void __lru_cache_activate_page(struct page *page)
  */
 void mark_page_accessed(struct page *page)
 {
+	/* 此页为非活动页，并且没有锁在内存中，并且PG_referenced被置位 */
 	if (!PageActive(page) && !PageUnevictable(page) &&
 			PageReferenced(page)) {
 
@@ -636,13 +648,14 @@ void mark_page_accessed(struct page *page)
 			 * 会设置page的PG_active
 			 */
 			__lru_cache_activate_page(page);
+		/* 清除PG_referenced，这里已经将其放入到活动页lru链表中 */
 		ClearPageReferenced(page);
 		/* 页是用于page cache */
 		if (page_is_file_cache(page))
 			/* zone->inactive_age++ */
 			workingset_activation(page);
 	} else if (!PageReferenced(page)) {
-		/* 设置此页最近被访问过 */
+		/* PG_referenced没有被设置过，这里设置此页最近被访问过 */
 		SetPageReferenced(page);
 	}
 }
@@ -709,12 +722,15 @@ void lru_cache_add(struct page *page)
  * while it's locked or otherwise "invisible" to other tasks.  This is
  * difficult to do when using the pagevec cache, so bypass that.
  */
+/* 将页加入到不能换出的页lru链表 */
 void add_page_to_unevictable_list(struct page *page)
 {
+	/* 获取页所在zone */
 	struct zone *zone = page_zone(page);
 	struct lruvec *lruvec;
 
 	spin_lock_irq(&zone->lru_lock);
+	/* 获取zone的lruvec */
 	lruvec = mem_cgroup_page_lruvec(page, zone);
 	ClearPageActive(page);
 	SetPageUnevictable(page);
@@ -733,13 +749,17 @@ void add_page_to_unevictable_list(struct page *page)
  * directly back onto it's zone's unevictable list, it does NOT use a
  * per cpu pagevec.
  */
+/* 通过判断，将页加入到活动lru缓存或者不能换出页的lru链表 */
 void lru_cache_add_active_or_unevictable(struct page *page,
 					 struct vm_area_struct *vma)
 {
 	VM_BUG_ON_PAGE(PageLRU(page), page);
 
+	/* 如果此vma中的页不是特殊页，并且不需要锁到内存中 */
 	if (likely((vma->vm_flags & (VM_LOCKED | VM_SPECIAL)) != VM_LOCKED)) {
+		/* 设置页属于活动lru链表 */
 		SetPageActive(page);
+		/* 加入到当前CPU的lru_add缓存中 */
 		lru_cache_add(page);
 		return;
 	}
@@ -750,10 +770,12 @@ void lru_cache_add_active_or_unevictable(struct page *page,
 		 * counter is not modified from interrupt context, and the pte
 		 * lock is held(spinlock), which implies preemption disabled.
 		 */
+		/* 统计锁入内存中的页数量 */
 		__mod_zone_page_state(page_zone(page), NR_MLOCK,
 				    hpage_nr_pages(page));
 		count_vm_event(UNEVICTABLE_PGMLOCKED);
 	}
+	/* 如果此vma是用于特殊页或者vma中的页需要锁在内存中，将页加入到不能换出的页链表 */
 	add_page_to_unevictable_list(page);
 }
 
@@ -803,7 +825,7 @@ static void lru_deactivate_fn(struct page *page, struct lruvec *lruvec,
 	/* 清除PG_active和PG_referenced */
 	ClearPageActive(page);
 	ClearPageReferenced(page);
-	/* 加到非活动页lru链表中 */
+	/* 加到非活动页lru链表头部 */
 	add_page_to_lru_list(page, lruvec, lru);
 
 	if (PageWriteback(page) || PageDirty(page)) {

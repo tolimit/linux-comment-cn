@@ -982,6 +982,7 @@ static inline int copy_pmd_range(struct mm_struct *dst_mm, struct mm_struct *src
 	return 0;
 }
 
+/* 从src_mm的src_pgd这个页全局目录项中复制addr ~ end这段地址对应的页上级目录项到dst_mm的dst_pgd中 */
 static inline int copy_pud_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pgd_t *dst_pgd, pgd_t *src_pgd, struct vm_area_struct *vma,
 		unsigned long addr, unsigned long end)
@@ -989,14 +990,24 @@ static inline int copy_pud_range(struct mm_struct *dst_mm, struct mm_struct *src
 	pud_t *src_pud, *dst_pud;
 	unsigned long next;
 
+	/* 如果dst_pgd没有映射到页上级目录，则申请一页用于页上级目录，并与dst_pgd这项页全局目录项关联 
+	 * 返回addr对应的页上级目录项
+	 */
 	dst_pud = pud_alloc(dst_mm, dst_pgd, addr);
+	/* 没申请到内存 */
 	if (!dst_pud)
 		return -ENOMEM;
+	/* 获取addr在src_pgd中对应的页上级目录项 */
 	src_pud = pud_offset(src_pgd, addr);
 	do {
+		/* 获取从addr ~ end，一个页上级目录项能够映射到的结束地址，返回这个结束地址
+		 * 循环后会将addr = next，这样下次就会从 next ~ end，一步一步以pud能映射的地址范围长度减小
+		 */
 		next = pud_addr_end(addr, end);
+		/* 源pud是空的或者有问题 */
 		if (pud_none_or_clear_bad(src_pud))
 			continue;
+		/* 对这个页上级目录项对应的页中间目录项进行操作 */
 		if (copy_pmd_range(dst_mm, src_mm, dst_pud, src_pud,
 						vma, addr, next))
 			return -ENOMEM;
@@ -1004,12 +1015,22 @@ static inline int copy_pud_range(struct mm_struct *dst_mm, struct mm_struct *src
 	return 0;
 }
 
+/* 
+ * dst_mm: 子进程的mm
+ * src_mm: 父进程的mm
+ * vma: 父进程当前遍历到的vma
+ */
+/* 将src_mm的vma对应的开始地址到结束地址这段地址的页表复制到dst_mm中
+ * 如果这段vma有可能会进行写时复制(vma可写，并且不是共享的VM_SHARED)，那就会对dst_mm和src_mm的页表项都设置为映射的页是只读的(vma中权限是可写)，这样写时会发生缺页异常，在缺页异常中做写时复制 
+ */
 int copy_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		struct vm_area_struct *vma)
 {
 	pgd_t *src_pgd, *dst_pgd;
 	unsigned long next;
+	/* 开始地址 */
 	unsigned long addr = vma->vm_start;
+	/* 结束地址 */
 	unsigned long end = vma->vm_end;
 	unsigned long mmun_start;	/* For mmu_notifiers */
 	unsigned long mmun_end;		/* For mmu_notifiers */
@@ -1022,12 +1043,14 @@ int copy_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	 * readonly mappings. The tradeoff is that copy_page_range is more
 	 * efficient than faulting.
 	 */
+	/* 这里只会处理匿名线性区或者包含有(VM_HUGETLB | VM_NONLINEAR | VM_PFNMAP | VM_MIXEDMAP)这几种标志的vma */
 	if (!(vma->vm_flags & (VM_HUGETLB | VM_NONLINEAR |
 			       VM_PFNMAP | VM_MIXEDMAP))) {
 		if (!vma->anon_vma)
 			return 0;
 	}
 
+	/* 如果是使用了hugetlbfs中的大页的情况 vma->vm_flags & VM_HUGETLB */
 	if (is_vm_hugetlb_page(vma))
 		return copy_hugetlb_page_range(dst_mm, src_mm, vma);
 
@@ -1047,20 +1070,36 @@ int copy_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	 * parent mm. And a permission downgrade will only happen if
 	 * is_cow_mapping() returns true.
 	 */
+	/* 检查是否可能会对此vma进行写入(要求此vma是非共享vma，并且可能写入) (flags & (VM_SHARED | VM_MAYWRITE)) == VM_MAYWRITE */
 	is_cow = is_cow_mapping(vma->vm_flags);
 	mmun_start = addr;
 	mmun_end   = end;
+
+	/* 此vma可能会进行写时复制的处理 */
 	if (is_cow)
+		/* 如果此vma使用了mm->mmu_notifier_mm这个通知链，则初始化这个通知链，通知的地址范围是addr ~ end */
 		mmu_notifier_invalidate_range_start(src_mm, mmun_start,
 						    mmun_end);
 
 	ret = 0;
+	/* 获取子进程对于开始地址对应的页全局目录项 */
 	dst_pgd = pgd_offset(dst_mm, addr);
+	/* 获取父进程对于开始地址对应的页全局目录项 
+	 * 实际这两项在页全局目录的偏移是一样的，只是项中的数据不同，子进程的页全局目录项是空的
+	 */
 	src_pgd = pgd_offset(src_mm, addr);
 	do {
+		/* 获取从addr ~ end，一个页全局目录项从addr开始能够映射到的结束地址，返回这个结束地址
+		 * 循环后会将addr = next，这样下次就会从 next ~ end，一步一步以pud能映射的地址范围长度减小
+		 */
 		next = pgd_addr_end(addr, end);
+		/* 父进程的页全局目录项是空的的情况 */
 		if (pgd_none_or_clear_bad(src_pgd))
 			continue;
+		/* 对这个页全局目录项对应的页上级目录项进行操作
+		 * 并会不停深入，直到页表项
+		 * 里面的处理与这个循环几乎一致，不过会在里面判断是否要对dst_pgd的各层申请页用于页表
+		 */
 		if (unlikely(copy_pud_range(dst_mm, src_mm, dst_pgd, src_pgd,
 					    vma, addr, next))) {
 			ret = -ENOMEM;
@@ -2602,7 +2641,9 @@ out_release:
 static inline int check_stack_guard_page(struct vm_area_struct *vma, unsigned long address)
 {
 	address &= PAGE_MASK;
+	/* vma是向下增长，并且address是vma的起始地址 */
 	if ((vma->vm_flags & VM_GROWSDOWN) && address == vma->vm_start) {
+		/* 获取vma前一个vma，也就是第一个地址比此vma小的vma */
 		struct vm_area_struct *prev = vma->vm_prev;
 
 		/*
@@ -2611,11 +2652,16 @@ static inline int check_stack_guard_page(struct vm_area_struct *vma, unsigned lo
 		 * That's only ok if it's the same stack mapping
 		 * that has gotten split..
 		 */
+		/* 如果前一个vma的结束地址就是等于此vma的起始地址 */
 		if (prev && prev->vm_end == address)
+			/* 如果前一个vma的结束地址就是等于此vma的起始地址，这种情况如果prev这个vma是向下增长的则没问题，否则返回-ENOMEM */
 			return prev->vm_flags & VM_GROWSDOWN ? 0 : -ENOMEM;
+
+		/* 这里是prev的结束地址小于address的处理情况 */
 
 		return expand_downwards(vma, address - PAGE_SIZE);
 	}
+	/* vma是向上增长，并且address是vma的结束地址 */
 	if ((vma->vm_flags & VM_GROWSUP) && address + PAGE_SIZE == vma->vm_end) {
 		struct vm_area_struct *next = vma->vm_next;
 
@@ -2633,6 +2679,10 @@ static inline int check_stack_guard_page(struct vm_area_struct *vma, unsigned lo
  * but allow concurrent faults), and pte mapped but not yet locked.
  * We return with mmap_sem still held, but pte unmapped and unlocked.
  */
+/* 分配一个匿名页，并为此页建立映射和反向映射
+ * 进入此函数的条件，线性地址address对应的进程的页表项为空，并且address所属vma是匿名线性区
+ * 进入到此函数前，已经对address对应的页全局目录项、页上级目录项、页中间目录项和页表进行分配和设置
+ */
 static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned long address, pte_t *page_table, pmd_t *pmd,
 		unsigned int flags)
@@ -2642,26 +2692,44 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	spinlock_t *ptl;
 	pte_t entry;
 
+	/* X86_64下这里没做任何事，而X86_32位下如果page_table之前用来建立了临时内核映射，则释放该映射 */
 	pte_unmap(page_table);
 
 	/* Check if we need to add a guard page to the stack */
+	/* 如果vma是向下增长的，并且address等于vma的起始地址，那么将vma起始地址处向下扩大一个页用于保护页 
+	 * 同样，如果vma是向上增长的，address等于vma的结束地址，页将vma在结束地址处向上扩大一个页用于保护页
+	 */
 	if (check_stack_guard_page(vma, address) < 0)
 		return VM_FAULT_SIGBUS;
 
 	/* Use the zero-page for reads */
+	/* vma中的页是只读的的情况，因为是匿名页，又是只读的，不会是代码段，这里如果执行成功，不会对此页进行反向映射 */
 	if (!(flags & FAULT_FLAG_WRITE)) {
+		/* 创建pte页表项，这个pte会指向内核中一个默认的全是0的页框，并且会有vma->vm_page_prot中的标志，最后会加上_PAGE_SPECIAL标志 */
 		entry = pte_mkspecial(pfn_pte(my_zero_pfn(address),
 						vma->vm_page_prot));
+		/* 当(NR_CPUS >= CONFIG_SPLIT_PTLOCK_CPUS)并且配置了USE_SPLIT_PTE_PTLOCKS时，对pmd所在的页上锁(锁是页描述符的ptl)
+		 * 否则对整个页表上锁，锁是mm->page_table_lock
+		 * 并再次获取address对应的页表项，有可能在其他核上被修改?
+		 */
 		page_table = pte_offset_map_lock(mm, pmd, address, &ptl);
+		/* 如果页表项不为空，则说明这页曾经被该进程访问过，可能其他核上更改了此页表项 */
 		if (!pte_none(*page_table))
 			goto unlock;
 		goto setpte;
 	}
 
 	/* Allocate our own private page. */
+	/* 为vma准备反向映射条件 
+	 * 检查此vma能与前后的vma进行合并吗，如果可以，则使用能够合并的那个vma的anon_vma，如果不能够合并，则申请一个空闲的vma
+ 	 * 新建一个anon_vma_chain，并且如果vma没有anon_vma则新建一个
+ 	 * 将avc->anon_vma指向获得的vma，avc->vma指向vma，并把avc加入到vma的anon_vma_chain中
+ 	 */
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
+	/* 从高端内存区的伙伴系统中获取一个页，这个页会清0 */
 	page = alloc_zeroed_user_highpage_movable(vma, address);
+	/* 分配不成功 */
 	if (!page)
 		goto oom;
 	/*
@@ -2669,33 +2737,57 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	 * preceeding stores to the page contents become visible before
 	 * the set_pte_at() write.
 	 */
+	/* 设置此页的PG_uptodate标志，表示此页是最新的 */
 	__SetPageUptodate(page);
 
+	/* 更新memcg中的计数，如果超过了memcg中的限制值，则会把这个页释放掉，并返回VM_FAULT_OOM */
 	if (mem_cgroup_try_charge(page, mm, GFP_KERNEL, &memcg))
 		goto oom_free_page;
 
+	/* 根据vma的页表项参数，创建一个页表项 */
 	entry = mk_pte(page, vma->vm_page_prot);
+	/* 如果vma区是可写的，则给页表项添加允许写标志 */
 	if (vma->vm_flags & VM_WRITE)
 		entry = pte_mkwrite(pte_mkdirty(entry));
 
+	/* 并再次获取address对应的页表项，并且上锁，锁可能在页中间目录对应的struct page的ptl中，也可能是mm_struct的page_table_lock
+	 * 因为需要修改，所以要上锁，而只读的情况是不需要上锁的
+	 */
 	page_table = pte_offset_map_lock(mm, pmd, address, &ptl);
 	if (!pte_none(*page_table))
 		goto release;
 
+	/* 增加mm_struct中匿名页的统计计数 */
 	inc_mm_counter_fast(mm, MM_ANONPAGES);
+	/* 对这个新页进行反向映射 
+	 * 主要工作是:
+	 * 设置此页的_mapcount = 0，说明此页正在使用，但是是非共享的(>0是共享)
+	 * 统计
+	 * 设置page->mapping最低位为1
+	 * page->mapping指向此vma->anon_vma
+	 * page->index存放此page在vma中的第几页
+	 */
 	page_add_new_anon_rmap(page, vma, address);
+	/* 更新memcg中的统计 */
 	mem_cgroup_commit_charge(page, memcg, false);
+	/* 通过判断，将页加入到活动lru缓存或者不能换出页的lru链表 */
 	lru_cache_add_active_or_unevictable(page, vma);
 setpte:
+	/* 将上面配置好的页表项写入页表 */
 	set_pte_at(mm, address, page_table, entry);
 
 	/* No need to invalidate - it was non-present before */
+	/* 让mmu更新页表项，应该会清除tlb */
 	update_mmu_cache(vma, address, page_table);
 unlock:
+	/* 解锁 */
 	pte_unmap_unlock(page_table, ptl);
 	return 0;
+	/* 以下是错误处理 */
 release:
+	/* 取消此page在memcg中的计数 */
 	mem_cgroup_cancel_charge(page, memcg);
+	/* 将此页释放到每CPU页高速缓存中 */
 	page_cache_release(page);
 	goto unlock;
 oom_free_page:
@@ -3203,6 +3295,14 @@ out:
  * The mmap_sem may have been released depending on flags and our
  * return value.  See filemap_fault() and __lock_page_or_retry().
  */
+/*
+ * mm: 对应的进程的struct mm_struct
+ * vma: address对应的该进程的vma
+ * address: 发生缺页异常的地址
+ * pte: 该进程address所属的页表
+ * pmd: 该进程address所属的页中间目录项
+ * flags: 标志
+ */
 static int handle_pte_fault(struct mm_struct *mm,
 		     struct vm_area_struct *vma, unsigned long address,
 		     pte_t *pte, pmd_t *pmd, unsigned int flags)
@@ -3210,20 +3310,29 @@ static int handle_pte_fault(struct mm_struct *mm,
 	pte_t entry;
 	spinlock_t *ptl;
 
+	/* 获取pte页表项对应的内容 */
 	entry = ACCESS_ONCE(*pte);
+	/* pte_present(entry)获取页表项entry对应的页是否在内存中 */
 	if (!pte_present(entry)) {
+		/* 页表项entry对应的页不在内存中 */
+
+		/* 页表项内容为空，表明进程没有访问过此页 */
 		if (pte_none(entry)) {
 			if (vma->vm_ops) {
 				if (likely(vma->vm_ops->fault))
+					/* 如果vm_ops字段和fault字段都不为空，则说明这是一个基于文件的映射 */
 					return do_linear_fault(mm, vma, address,
 						pte, pmd, flags, entry);
 			}
+			/* 否则是匿名页映射 */
 			return do_anonymous_page(mm, vma, address,
 						 pte, pmd, flags);
 		}
+		/* 通过页表项判断是否是文件页，是的话进行处理 */
 		if (pte_file(entry))
 			return do_nonlinear_fault(mm, vma, address,
 					pte, pmd, flags, entry);
+		/* 如果页表项entry表明不是磁盘文件，则是匿名映射的页被换出 */
 		return do_swap_page(mm, vma, address,
 					pte, pmd, flags, entry);
 	}
@@ -3235,8 +3344,11 @@ static int handle_pte_fault(struct mm_struct *mm,
 	spin_lock(ptl);
 	if (unlikely(!pte_same(*pte, entry)))
 		goto unlock;
+	/* 错误是因为对没有写权限的页进行写， */
 	if (flags & FAULT_FLAG_WRITE) {
+		/* 是页表项没有写权限 */
 		if (!pte_write(entry))
+			/* 进行此页的写时复制 */
 			return do_wp_page(mm, vma, address,
 					pte, pmd, ptl, entry);
 		entry = pte_mkdirty(entry);
@@ -3354,6 +3466,7 @@ static int __handle_mm_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	 * read mode and khugepaged takes it in write mode. So now it's
 	 * safe to run pte_offset_map().
 	 */
+	/* 根据pmd和address，获取address对应的页表项 */
 	pte = pte_offset_map(pmd, address);
 
 	return handle_pte_fault(mm, vma, address, pte, pmd, flags);

@@ -55,6 +55,7 @@ static bool vmacache_valid_mm(struct mm_struct *mm)
 	return current->mm == mm && !(current->flags & PF_KTHREAD);
 }
 
+/* 将newvma加入到当前进程的vmacache中，注意当前进程如果为内核进程则无效，内核进程没有自己的struct mm_struct */
 void vmacache_update(unsigned long addr, struct vm_area_struct *newvma)
 {
 	if (vmacache_valid_mm(newvma->vm_mm))
@@ -81,6 +82,7 @@ static bool vmacache_valid(struct mm_struct *mm)
 	return true;
 }
 
+/* 从当前进程的描述符的vmacache中查找包含有addr的vma */
 struct vm_area_struct *vmacache_find(struct mm_struct *mm, unsigned long addr)
 {
 	int i;

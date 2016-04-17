@@ -65,20 +65,25 @@
 static struct kmem_cache *anon_vma_cachep;
 static struct kmem_cache *anon_vma_chain_cachep;
 
+/* 从anon_vma_cachep这个slab中分配一个anon_vma结构，将其refcount设为1，anon_vma->root指向本身 */
 static inline struct anon_vma *anon_vma_alloc(void)
 {
 	struct anon_vma *anon_vma;
 
+	/* 从anon_vma_cachep这个slab中分配一个anon_vma结构 */
 	anon_vma = kmem_cache_alloc(anon_vma_cachep, GFP_KERNEL);
 	if (anon_vma) {
+		/* 分配成功，新的anon_vma->refcount设置为1 */
 		atomic_set(&anon_vma->refcount, 1);
 		/*
 		 * Initialise the anon_vma root to point to itself. If called
 		 * from fork, the root will be reset to the parents anon_vma.
 		 */
+		/* 新的anon_vma的root指向本身 */
 		anon_vma->root = anon_vma;
 	}
-
+	
+	/* 返回分配成功的anon_vma */
 	return anon_vma;
 }
 
@@ -128,7 +133,9 @@ static void anon_vma_chain_link(struct vm_area_struct *vma,
 {
 	avc->vma = vma;
 	avc->anon_vma = anon_vma;
+	/* 将新的avc->same_vma加入到vma的anon_vma_chain链表头部 */
 	list_add(&avc->same_vma, &vma->anon_vma_chain);
+	/* 将avc->rb加入到anon_vma的红黑树中 */
 	anon_vma_interval_tree_insert(avc, &anon_vma->rb_root);
 }
 
@@ -159,39 +166,78 @@ static void anon_vma_chain_link(struct vm_area_struct *vma,
  *
  * This must be called with the mmap_sem held for reading.
  */
+/* 为vma准备反向映射条件 
+ * 如果vma没有anon_vma则新建一个，并且同时新建一个anon_vma_chain
+ * 检查此vma能与前后的vma进行合并吗，如果可以，则使用能够合并的那个vma的anon_vma，如果不能够合并，则申请一个空闲的vma
+ * 将avc->anon_vma指向获得的vma，avc->vma指向vma，并把avc加入到vma的anon_vma_chain中
+ */
 int anon_vma_prepare(struct vm_area_struct *vma)
 {
+	/* 获取vma的反向映射的anon_vma结构 */
 	struct anon_vma *anon_vma = vma->anon_vma;
 	struct anon_vma_chain *avc;
 
+	/* 检查是否需要睡眠 */
 	might_sleep();
+	/* 如果此vma的anon_vma为空，则进行以下处理 */
 	if (unlikely(!anon_vma)) {
+		/* 获取vma所属的mm */
 		struct mm_struct *mm = vma->vm_mm;
 		struct anon_vma *allocated;
 
+		/* 通过slab/slub分配一个struct anon_vma_chain */
 		avc = anon_vma_chain_alloc(GFP_KERNEL);
 		if (!avc)
 			goto out_enomem;
 
+		/* 检查vma能否与其前后的vma进行合并，如果可以，则返回能够合并的那个vma的anon_vma
+		 * 先检查能否与其后的vma合并，再检查能否与前面的vma合并
+		 */
+		/* 检查vma能否与其前/后vma进行合并，如果可以，则返回能够合并的那个vma的anon_vma 
+		 * 主要检查vma前后的vma是否连在一起(vma->vm_end == 前/后vma->vm_start)
+		 * vma->vm_policy和前/后vma->vm_policy
+		 * 是否都为文件映射，除了(VM_READ|VM_WRITE|VM_EXEC|VM_SOFTDIRTY)其他标志位是否相同，如果为文件映射，前/后vma映射的文件位置是否正好等于vma映射的文件 + vma的长度
+		 * 这里有个疑问，为什么匿名线性区会有vm_file不为空的时候，我也没找到原因
+		 * 可以合并，则返回可合并的线性区的anon_vma
+		 */
 		anon_vma = find_mergeable_anon_vma(vma);
 		allocated = NULL;
+		/* anon_vma为空，也就是vma不能与前后的vma合并，则会分配一个 */
 		if (!anon_vma) {
+			
+			/* 从anon_vma_cachep这个slab中分配一个anon_vma结构，将其refcount设为1，anon_vma->root指向本身 */
 			anon_vma = anon_vma_alloc();
 			if (unlikely(!anon_vma))
 				goto out_enomem_free_avc;
+			/* 刚分配好的anon_vma存放在allocated */
 			allocated = anon_vma;
 		}
 
+		/* 到这里，anon_vma有可能是可以合并的vma的anon_vma，也有可能是刚分配的anon_vma */
+		
+		/* 对anon_vma->root->rwsem上写锁，如果是新分配的anon_vma则是其本身的rwsem */
 		anon_vma_lock_write(anon_vma);
 		/* page_table_lock to protect against threads */
+		/* 获取当前进程的线性区锁 */
 		spin_lock(&mm->page_table_lock);
+		/* 如果vma->anon_vma为空，这是很可能发生的，因为此函数开头获取的anon_vma为空才会走到这条代码路径上 */
 		if (likely(!vma->anon_vma)) {
+			/* 将vma->anon_vma设置为新分配的anon_vma，这个anon_vma也可能是前后能够合并的vma的anon_vma */
 			vma->anon_vma = anon_vma;
+			/*
+			 * avc->vma = vma
+			 * avc->anon_vma = anon_vma(这个可能是当前vma的anon_vma，也可能是前后可合并vma的anon_vma)
+			 * 将新的avc->same_vma加入到vma的anon_vma_chain链表中
+			 * 将新的avc->rb加入到anon_vma的红黑树中
+			 */
 			anon_vma_chain_link(vma, avc, anon_vma);
+			/* 这两个置空，后面就不会释放掉 */
 			allocated = NULL;
 			avc = NULL;
 		}
+		/* mm的页表的锁 */
 		spin_unlock(&mm->page_table_lock);
+		/* 释放anon_vma的写锁 */
 		anon_vma_unlock_write(anon_vma);
 
 		if (unlikely(allocated))
@@ -215,9 +261,12 @@ int anon_vma_prepare(struct vm_area_struct *vma)
  * Such anon_vma's should have the same root, so you'd expect to see
  * just a single mutex_lock for the whole traversal.
  */
+/* anon_vma是父节点的anon_vma */
 static inline struct anon_vma *lock_anon_vma_root(struct anon_vma *root, struct anon_vma *anon_vma)
 {
+	/* 获取anon_vma的红黑树的根，这个root初始化后是指向本身这个anon_vma的 */
 	struct anon_vma *new_root = anon_vma->root;
+	/* 如果new_root != root，则对root上锁 */
 	if (new_root != root) {
 		if (WARN_ON_ONCE(root))
 			up_write(&root->rwsem);
@@ -237,26 +286,43 @@ static inline void unlock_anon_vma_root(struct anon_vma *root)
  * Attach the anon_vmas from src to dst.
  * Returns 0 on success, -ENOMEM on failure.
  */
+/* dst为子进程的vma，src为父进程的vma */
 int anon_vma_clone(struct vm_area_struct *dst, struct vm_area_struct *src)
 {
 	struct anon_vma_chain *avc, *pavc;
 	struct anon_vma *root = NULL;
 
+	/* 遍历父进程的每个anon_vma_chain链表中的结点，保存在pavc中 */
 	list_for_each_entry_reverse(pavc, &src->anon_vma_chain, same_vma) {
 		struct anon_vma *anon_vma;
 
+		/* 分配一个新的avc结构 */
 		avc = anon_vma_chain_alloc(GFP_NOWAIT | __GFP_NOWARN);
+		/* 如果分配失败 */
 		if (unlikely(!avc)) {
 			unlock_anon_vma_root(root);
 			root = NULL;
+			/* 再次分配，一定要分配成功 */
 			avc = anon_vma_chain_alloc(GFP_KERNEL);
 			if (!avc)
 				goto enomem_failure;
 		}
+		/* 获取父结点的pavc指向的anon_vma */
 		anon_vma = pavc->anon_vma;
+		/* 对anon_vma的root上锁
+		 * 如果root != anon_vma->root，则对root上锁，并返回anon_vma->root
+		 * 第一次循环，root = NULL
+		 */
 		root = lock_anon_vma_root(root, anon_vma);
+		/* 
+		 * 设置新的avc->vma指向子进程的vma
+		 * 设置新的avc->anon_vma指向父进程anon_vma_chain结点指向的anon_vma(这个anon_vma不一定属于父进程)
+		 * 将新的avc->same_vma加入到子进程的anon_vma_chain链表头部
+		 * 将新的avc->rb加入到父进程anon_vma_chain结点指向的anon_vma
+		 */
 		anon_vma_chain_link(dst, avc, anon_vma);
 	}
+	/* 释放根的锁 */
 	unlock_anon_vma_root(root);
 	return 0;
 
@@ -270,6 +336,7 @@ int anon_vma_clone(struct vm_area_struct *dst, struct vm_area_struct *src)
  * the corresponding VMA in the parent process is attached to.
  * Returns 0 on success, non-zero on failure.
  */
+/* vma为子进程的vma，pvma为父进程的vma，如果父进程的此vma没有anon_vma，直接返回 */
 int anon_vma_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma)
 {
 	struct anon_vma_chain *avc;
@@ -277,6 +344,7 @@ int anon_vma_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma)
 	int error;
 
 	/* Don't bother if the parent process has no anon_vma here. */
+	/* 父进程的此vma没有anon_vma，直接返回 */
 	if (!pvma->anon_vma)
 		return 0;
 
@@ -284,14 +352,25 @@ int anon_vma_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma)
 	 * First, attach the new VMA to the parent VMA's anon_vmas,
 	 * so rmap can find non-COWed pages in child processes.
 	 */
+	/* 这里开始先检查父进程的此vma是否有anon_vma，有则继续，而上面进行了判断，只有父进程的此vma有anon_vma才会执行到这里
+	 * 这里会遍历父进程的vma的anon_vma_chain链表，对每个结点新建一个anon_vma_chain，然后
+	 * 设置新的avc->vma指向子进程的vma
+	 * 设置新的avc->anon_vma指向父进程anon_vma_chain结点指向的anon_vma(这个anon_vma不一定属于父进程)
+	 * 将新的avc->same_vma加入到子进程的anon_vma_chain链表中
+	 * 将新的avc->rb加入到父进程anon_vma_chain结点指向的anon_vma
+	 */
 	error = anon_vma_clone(vma, pvma);
 	if (error)
 		return error;
 
 	/* Then add our own anon_vma. */
+	/* 分配一个anon_vma结构用于子进程，将其refcount设为1，anon_vma->root指向本身
+	 * 即使此vma是用于映射文件的，也会分配一个anon_vma
+	 */
 	anon_vma = anon_vma_alloc();
 	if (!anon_vma)
 		goto out_error;
+	/* 分配一个struct anon_vma_chain结构 */
 	avc = anon_vma_chain_alloc(GFP_KERNEL);
 	if (!avc)
 		goto out_error_free_anon_vma;
@@ -300,17 +379,26 @@ int anon_vma_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma)
 	 * The root anon_vma's spinlock is the lock actually used when we
 	 * lock any of the anon_vmas in this anon_vma tree.
 	 */
+	/* 将新的anon_vma的root指向父进程的anon_vma的root */
 	anon_vma->root = pvma->anon_vma->root;
 	/*
 	 * With refcounts, an anon_vma can stay around longer than the
 	 * process it belongs to. The root anon_vma needs to be pinned until
 	 * this anon_vma is freed, because the lock lives in the root.
 	 */
+	/* 对父进程与子进程的anon_vma共同的root的refcount进行+1 */
 	get_anon_vma(anon_vma->root);
 	/* Mark this anon_vma as the one where our new (COWed) pages go. */
 	vma->anon_vma = anon_vma;
+	/* 对这个新的anon_vma上锁 */
 	anon_vma_lock_write(anon_vma);
+	/* 新的avc的vma指向子进程的vma
+	 * 新的avc的anon_vma指向子进程vma的anon_vma
+	 * 新的avc的same_vma加入到子进程vma的anon_vma_chain链表的头部
+	 * 新的avc的rb加入到子进程vma的anon_vma的红黑树中
+	 */
 	anon_vma_chain_link(vma, avc, anon_vma);
+	/* 对这个anon_vma解锁 */
 	anon_vma_unlock_write(anon_vma);
 
 	return 0;
@@ -446,19 +534,24 @@ out:
  * atomic op -- the trylock. If we fail the trylock, we fall back to getting a
  * reference like with page_get_anon_vma() and then block on the mutex.
  */
+/* 获取page的anon_vma，并对其上读锁 */
 struct anon_vma *page_lock_anon_vma_read(struct page *page)
 {
 	struct anon_vma *anon_vma = NULL;
 	struct anon_vma *root_anon_vma;
 	unsigned long anon_mapping;
 
+	/* 上rcu读锁 */
 	rcu_read_lock();
+	/* 获取page->mapping */
 	anon_mapping = (unsigned long) ACCESS_ONCE(page->mapping);
 	if ((anon_mapping & PAGE_MAPPING_FLAGS) != PAGE_MAPPING_ANON)
 		goto out;
+	/* 检查page是否有被线性区引用，page->_mapcount >= 0 */
 	if (!page_mapped(page))
 		goto out;
 
+	/* 获取page对应的anon_vma，page->mapping最低两位用于判断，其他位用于保存指向的地址 */
 	anon_vma = (struct anon_vma *) (anon_mapping - PAGE_MAPPING_ANON);
 	root_anon_vma = ACCESS_ONCE(anon_vma->root);
 	if (down_read_trylock(&root_anon_vma->rwsem)) {
@@ -519,6 +612,9 @@ void page_unlock_anon_vma_read(struct anon_vma *anon_vma)
 static inline unsigned long
 __vma_address(struct page *page, struct vm_area_struct *vma)
 {
+	/* 获取此页在vma中的偏移量(以页为单位) 
+	 * 如果是匿名线性区，page->index中保存的是此页映射到了匿名线性区中的第几页
+	 */
 	pgoff_t pgoff = page_to_pgoff(page);
 	return vma->vm_start + ((pgoff - vma->vm_pgoff) << PAGE_SHIFT);
 }
@@ -767,7 +863,11 @@ static bool invalid_page_referenced_vma(struct vm_area_struct *vma, void *arg)
  * Quick test_and_clear_referenced for all mappings to a page,
  * returns the number of ptes which referenced the page.
  */
-/* 检查此page最近是否有被访问 */
+/* 检查此page最近是否有被访问
+ * PRFA扫描一页调用一次此函数，如果此页的PG_referenced标志或者引用此页的页表项的Accessed置位，则表明此函数最近有被访问，返回1，否则返回0
+ * 并且此函数没扫描一页都会将此页的PG_referenced标志和引用此页的页表项的Accessed清0，相当于从新开始直到下次page_referenced()扫描到此页时判断此页最近是否被访问
+ * 此函数会涉及到通过反向映射找到引用此页的页表
+ */
 int page_referenced(struct page *page,
 		    int is_locked,
 		    struct mem_cgroup *memcg,
@@ -775,18 +875,25 @@ int page_referenced(struct page *page,
 {
 	int ret;
 	int we_locked = 0;
+	/* 进行page_referenced处理时需要使用的参数 */
 	struct page_referenced_arg pra = {
 		.mapcount = page_mapcount(page),
 		.memcg = memcg,
 	};
+	/* 反向映射扫描函数 */
 	struct rmap_walk_control rwc = {
+		/* 设置反向映射时获得每一个线性区vma后的处理函数 */
 		.rmap_one = page_referenced_one,
+		/* 设置反向映射时需要用到的参数为pra */
 		.arg = (void *)&pra,
+		/* 设置获取anon_vma->rwsem锁的自定义函数 */
 		.anon_lock = page_lock_anon_vma_read,
 	};
 
 	*vm_flags = 0;
-	/* 如果此页没有被映射，直接返回0 */
+	/* 如果此页没有被映射，也就是没有被使用，直接返回0
+	 * 因为page->_mapcount >= 0说明有多少个线性区引用了此页，0代表只有1个进程的线性区引用了此页
+	 */
 	if (!page_mapped(page))
 		return 0;
 
@@ -794,7 +901,7 @@ int page_referenced(struct page *page,
 	if (!page_rmapping(page))
 		return 0;
 
-	/* 如果此页不是匿名页，并且用于KSM(内存合并)，并且没有上锁，则将其上锁 */
+	/* 如果此页不是匿名页，并且用于KSM(内存合并)，并且没有上锁，则将其上锁(设置PG_locked) */
 	if (!is_locked && (!PageAnon(page) || PageKsm(page))) {
 		/* 设置page的PG_locked标志 */
 		we_locked = trylock_page(page);
@@ -808,9 +915,11 @@ int page_referenced(struct page *page,
 	 * cgroups
 	 */
 	if (memcg) {
+		/* 设置判断线性区是否需要处理的函数 */
 		rwc.invalid_vma = invalid_page_referenced_vma;
 	}
 
+	/* 对此页进行反向映射 */
 	ret = rmap_walk(page, &rwc);
 	*vm_flags = pra.vm_flags;
 
@@ -918,13 +1027,16 @@ void page_move_anon_rmap(struct page *page,
  * @address:	User virtual address of the mapping	
  * @exclusive:	the page is exclusively owned by the current process
  */
+/* 对一个页建立反向映射 */
 static void __page_set_anon_rmap(struct page *page,
 	struct vm_area_struct *vma, unsigned long address, int exclusive)
 {
+	/* 获取该页所在的vma对应的anon_vma */
 	struct anon_vma *anon_vma = vma->anon_vma;
 
 	BUG_ON(!anon_vma);
 
+	/* 主要通过判断page->mapping的最低位是否为1来判断是否为匿名页，但是如果page是新的，所以它的page->mapping为空 */
 	if (PageAnon(page))
 		return;
 
@@ -936,8 +1048,11 @@ static void __page_set_anon_rmap(struct page *page,
 	if (!exclusive)
 		anon_vma = anon_vma->root;
 
+	/* 相当于anon_vma的地址+1，这个主要用于保存到page->mapping中，因为mapping的最低位用于判断是否为匿名页，最低位为1则为匿名页 */
 	anon_vma = (void *) anon_vma + PAGE_MAPPING_ANON;
+	/* page->mapping指向anon_vma */
 	page->mapping = (struct address_space *) anon_vma;
+	/* page->index存放此page是vma中的第几页 */
 	page->index = linear_page_index(vma, address);
 }
 
@@ -1028,16 +1143,32 @@ void do_page_add_anon_rmap(struct page *page,
  * This means the inc-and-test can be bypassed.
  * Page does not have to be locked.
  */
+/* 对一个新页进行反向映射
+ * page: 目标页
+ * vma: 访问此页的vma
+ * address: 线性地址
+ */
 void page_add_new_anon_rmap(struct page *page,
 	struct vm_area_struct *vma, unsigned long address)
 {
+	/* 地址必须处于vma中 */
 	VM_BUG_ON_VMA(address < vma->vm_start || address >= vma->vm_end, vma);
+	
 	SetPageSwapBacked(page);
+	/* 设置此页的_mapcount = 0，说明此页正在使用，但是是非共享的(>0是共享) */
 	atomic_set(&page->_mapcount, 0); /* increment count (starts at -1) */
+	/* 如果是透明大页 */
 	if (PageTransHuge(page))
+		/* 统计 */
 		__inc_zone_page_state(page, NR_ANON_TRANSPARENT_HUGEPAGES);
 	__mod_zone_page_state(page_zone(page), NR_ANON_PAGES,
 			hpage_nr_pages(page));
+
+	/* 进行反向映射
+	 * 设置page->mapping最低位为1
+	 * page->mapping指向此vma->anon_vma
+	 * page->index存放此page在vma中的第几页
+	 */
 	__page_set_anon_rmap(page, vma, address, 1);
 }
 
@@ -1601,6 +1732,7 @@ void __put_anon_vma(struct anon_vma *anon_vma)
 		anon_vma_free(root);
 }
 
+/* 获取此页对应的anon_vma中的读锁并返回此页对应的anon_vma */
 static struct anon_vma *rmap_walk_anon_lock(struct page *page,
 					struct rmap_walk_control *rwc)
 {
@@ -1615,6 +1747,7 @@ static struct anon_vma *rmap_walk_anon_lock(struct page *page,
 	 * are holding mmap_sem. Users without mmap_sem are required to
 	 * take a reference count to prevent the anon_vma disappearing
 	 */
+	/* 获取page对应的anon_vma */
 	anon_vma = page_anon_vma(page);
 	if (!anon_vma)
 		return NULL;
@@ -1637,13 +1770,20 @@ static struct anon_vma *rmap_walk_anon_lock(struct page *page,
  * vm_flags for that VMA.  That should be OK, because that vma shouldn't be
  * LOCKED.
  */
+/* 对匿名页page的反向映射扫描 */
 static int rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc)
 {
 	struct anon_vma *anon_vma;
+	/* 获取page->index，保存的是在线性区的页索引或是页的线性地址/PAGE_SIZE 
+	 * 获取这个是用于计算页的线性地址，通过vma->vm_start + page->index * PAGE_SIZE
+	 */
 	pgoff_t pgoff = page_to_pgoff(page);
 	struct anon_vma_chain *avc;
 	int ret = SWAP_AGAIN;
 
+	/* 获取page对应的anon_vma，并且在里面会调用anon_lock，如果anon_lock为空，则直接对anon_vma上一次读锁 
+	 * 如果从page_referenced()函数调用过来的情况，anon_lock为page_lock_anon_vma_read()
+	 */
 	anon_vma = rmap_walk_anon_lock(page, rwc);
 	if (!anon_vma)
 		return ret;
@@ -1652,9 +1792,11 @@ static int rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc)
 		struct vm_area_struct *vma = avc->vma;
 		unsigned long address = vma_address(page, vma);
 
+		/* 判断是否是不需要处理的线性区 */
 		if (rwc->invalid_vma && rwc->invalid_vma(vma, rwc->arg))
 			continue;
 
+		/* 处理获得的线性区 */
 		ret = rwc->rmap_one(page, vma, address, rwc->arg);
 		if (ret != SWAP_AGAIN)
 			break;
@@ -1725,12 +1867,13 @@ done:
 int rmap_walk(struct page *page, struct rmap_walk_control *rwc)
 {
 	if (unlikely(PageKsm(page)))
+		/* 此页用于ksm */
 		return rmap_walk_ksm(page, rwc);
 	else if (PageAnon(page))
-		/* 如果是匿名页 */
+		/* 如果此页是匿名页 */
 		return rmap_walk_anon(page, rwc);
 	else
-		/* 如果是文件页 */
+		/* 如果此页是映射页 */
 		return rmap_walk_file(page, rwc);
 }
 

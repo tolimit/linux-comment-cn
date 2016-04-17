@@ -221,9 +221,13 @@ struct zone_reclaim_stat {
 	 *
 	 * The anon LRU stats live in [0], file LRU stats in [1]
 	 */
-	/* rotated用于活动链表? */
+	/* rotated用于活动链表? 
+	 * 在mark_page_accessed()中将页加入到活动页lru链表时此值会++
+	 */
 	unsigned long		recent_rotated[2];
-	/* 最近扫描的页数量，或者是总体的页数量 */
+	/* 最近扫描的页数量，或者是总体的页数量 
+	 * 在mark_page_accessed()中将页加入到活动页lru链表时此值会++
+	 */
 	unsigned long		recent_scanned[2];
 };
 

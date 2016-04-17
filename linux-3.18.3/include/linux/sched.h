@@ -1385,6 +1385,7 @@ struct task_struct {
 #endif
 	/* per-thread vma caching */
 	u32 vmacache_seqnum;
+	/* vma的cache，当最近被访问的vma会放入这里面，长度为8，提高性能 */
 	struct vm_area_struct *vmacache[VMACACHE_SIZE];
 #if defined(SPLIT_RSS_COUNTING)
 	/* 线程可以使用的rss */
@@ -1546,7 +1547,7 @@ struct task_struct {
 	/* notifier函数所阻塞的信号的位掩码 */
 	sigset_t *notifier_mask;
 	struct callback_head *task_works;
-
+	/* 审计 */
 	struct audit_context *audit_context;
 #ifdef CONFIG_AUDITSYSCALL
 	kuid_t loginuid;
@@ -2027,6 +2028,7 @@ extern void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, 
 #define PF_WQ_WORKER	0x00000020	/* I'm a workqueue worker */
 #define PF_FORKNOEXEC	0x00000040	/* forked but didn't exec */
 #define PF_MCE_PROCESS  0x00000080      /* process policy on mce errors */
+/* 超级用户权限 */
 #define PF_SUPERPRIV	0x00000100	/* used super-user privileges */
 #define PF_DUMPCORE	0x00000200	/* dumped core */
 #define PF_SIGNALED	0x00000400	/* killed by a signal */
@@ -2041,6 +2043,7 @@ extern void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, 
 #define PF_MEMALLOC_NOIO 0x00080000	/* Allocating memory without IO involved */
 #define PF_LESS_THROTTLE 0x00100000	/* Throttle me less: I clean memory */
 #define PF_KTHREAD	0x00200000	/* I am a kernel thread */
+/* 随机化虚拟地址空间 */
 #define PF_RANDOMIZE	0x00400000	/* randomize virtual address space */
 #define PF_SWAPWRITE	0x00800000	/* Allowed to write to swap */
 #define PF_NO_SETAFFINITY 0x04000000	/* Userland is not allowed to meddle with cpus_allowed */

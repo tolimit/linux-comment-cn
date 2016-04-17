@@ -57,9 +57,10 @@ struct page {
 	unsigned long flags;		/* Atomic flags, some possibly
 					 * updated asynchronously */
 	union {
-		/* 如果为空，则该页属于交换高速缓存(swap cache，swap时会产生竞争条件，用swap cache解决)  
-		 * 不为空，最低位为0，表示该页为映射页(文件映射)，指向对应文件的struct address_space
-		 * 不为空，最低位为1，表示该页为匿名页，指向对应的anon_vma
+		/* 最低两位用于判断类型，其他位数用于保存指向的地址
+		 * 如果为空，则该页属于交换高速缓存(swap cache，swap时会产生竞争条件，用swap cache解决)  
+		 * 不为空，如果最低位为1，该页为匿名页，指向对应的anon_vma(分配时需要对齐)
+		 * 不为空，如果最低位为0，则该页为文件页，指向文件的address_space
 		 */
 		struct address_space *mapping;	/* If low bit clear, points to
 						 * inode address_space, or NULL.
@@ -78,6 +79,8 @@ struct page {
 		union {
 			/* 作为不同的含义被几种内核成分使用。例如，它在页磁盘映像或匿名区中标识存放在页框中的数据的位置，或者它存放一个换出页标识符
 			 * 当此页作为映射页(文件映射)时，保存这块页的数据在整个文件数据中以页为大小的偏移量
+			 * 当此页作为匿名页时，保存此页在线性区vma内的页索引或者是页的线性地址/PAGE_SIZE。
+			 * 对于匿名页的page->index表示的是page在vma中的偏移。共享匿名页的产生应该只有在fork，clone等时候。
 			 */
 			pgoff_t index;		/* Our offset within mapping. */
 			/* 用于SLAB和SLUB描述符，指向空闲对象链表 */
@@ -129,7 +132,9 @@ struct page {
 					 * never succeed on tail
 					 * pages.
 					 */
-					/* 页框中的页表项计数，如果没有为-1，如果为PAGE_BUDDY_MAPCOUNT_VALUE(-128)，说明此页及其后的一共2的private次方个数页框处于伙伴系统中，正在使用时应该是0 */
+					/* 页框中的页表项计数，如果没有为-1，如果为PAGE_BUDDY_MAPCOUNT_VALUE(-128)，说明此页及其后的一共2的private次方个数页框处于伙伴系统中
+					 * 如果大于等于0，说明此页正在使用，并且表示引用此页框的页表项数量，如果等于0则说明此页是非共享的，大于0表示此页是共享的
+					 */
 					atomic_t _mapcount;
 
 					struct { /* SLUB使用 */
@@ -143,6 +148,7 @@ struct page {
 					int units;	/* SLOB */
 				};
 				/* 页框的引用计数，如果为-1，则此页框空闲，并可分配给任一进程或内核；如果大于或等于0，则说明页框被分配给了一个或多个进程，或用于存放内核数据。page_count()返回_count加1的值，也就是该页的使用者数目 */
+				/* 当此页从伙伴系统拿出来时，_count默认被设置为1 */
 				/* 加入到lru链表的页这个引用计数会++，相反，从lru中拿出，_count会--
 				 * 此参数在内存回收的时候有很重要的意义
 				 */
@@ -285,7 +291,7 @@ struct vm_region {
  */
 /* 描述线性区结构 
  * 内核尽力把新分配的线性区与紧邻的现有线性区进程合并。如果两个相邻的线性区访问权限相匹配，就能把它们合并在一起。
- * 每个线性区都有一组连续号码的页所组成，而页只有在被访问的时候系统会产生缺页异常，在异常中分配页框
+ * 每个线性区都有一组连续号码的页(非页框)所组成，而页只有在被访问的时候系统会产生缺页异常，在异常中分配页框
  */
 struct vm_area_struct {
 	/* The first cache line has the info for VMA tree walking. */
@@ -296,11 +302,12 @@ struct vm_area_struct {
 	unsigned long vm_end;		
 
 	/* linked list of VM areas per task, sorted by address */
+	/* 整个链表会按地址大小递增排序 */
 	/* vm_next: 线性区链表中的下一个线性区 */
 	/* vm_prev: 线性区链表中的上一个线性区 */
 	struct vm_area_struct *vm_next, *vm_prev;
 
-	/* 用于组织当前内存描述符的线性区的红黑树 */
+	/* 用于组织当前内存描述符的线性区的红黑树的结点 */
 	struct rb_node vm_rb;
 
 	/*
@@ -309,6 +316,7 @@ struct vm_area_struct {
 	 * VMAs below us in the VMA rbtree and its ->vm_prev. This helps
 	 * get_unmapped_area find a free area of the right size.
 	 */
+	/* 此vma的子树中最大的空闲内存块大小(bytes) */
 	unsigned long rb_subtree_gap;
 
 	/* Second cache line starts here. */
@@ -328,7 +336,7 @@ struct vm_area_struct {
 	 * linkage into the address_space->i_mmap interval tree, or
 	 * linkage of vma in the address_space->i_mmap_nonlinear list.
 	 */
-	/* 链接到反映射所使用的数据结构 */
+	/* 链接到反向映射所使用的数据结构，主要用于映射页的反向映射 */
 	union {
 		struct {
 			struct rb_node rb;
@@ -343,7 +351,11 @@ struct vm_area_struct {
 	 * can only be in the i_mmap tree.  An anonymous MAP_PRIVATE, stack
 	 * or brk vma (with NULL file) can only be in an anon_vma list.
 	 */
-	/* 指向匿名线性区链表的指针 */
+	/* 
+	 * 指向匿名线性区链表头的指针，这个链表会将此mm_struct中的所有匿名线性区链接起来
+	 * 匿名的MAP_PRIVATE、堆和栈的vma都会存在于这个anon_vma_chain链表中
+	 * 如果mm_struct的anon_vma为空，那么其anon_vma_chain也一定为空
+	 */
 	struct list_head anon_vma_chain; /* Serialized by mmap_sem &
 					  * page_table_lock */
 	/* 指向anon_vma数据结构的指针 */
@@ -357,7 +369,7 @@ struct vm_area_struct {
 	/* 在映射文件中的偏移量。对匿名页，它等于0或者vm_start/PAGE_SIZE */
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
 					   units, *not* PAGE_CACHE_SIZE */
-	/* 指向映射文件的文件对象 */
+	/* 指向映射文件的文件对象，也可能指向建立shmem共享内存中返回的struct file，如果是匿名映射区，此值为NULL或者一个匿名文件(这里跟swap有关，待看) */
 	struct file * vm_file;		/* File we map to (can be NULL). */
 	/* 指向内存区的私有数据 */
 	void * vm_private_data;		/* was vm_pte (shared mem) */
@@ -402,7 +414,7 @@ struct mm_rss_stat {
 };
 
 struct kioctx_table;
-/* 内存描述符 */
+/* 内存描述符，每个进程都会有一个，除了内核线程(使用被调度出去的进程的mm_struct)和轻量级进程(使用父进程的mm_struct) */
 /* 所有的内存描述符存放在一个双向链表中，链表中第一个元素是init_mm，它是初始化阶段进程0的内存描述符 */
 struct mm_struct {
 	/* 指向线性区对象的链表头，链表是经过排序的，按线性地址升序排列 */
@@ -423,6 +435,7 @@ struct mm_struct {
 	unsigned long mmap_base;		/* base of mmap area */
 	unsigned long mmap_legacy_base;         /* base of mmap area in bottom-up allocations */
 	unsigned long task_size;		/* size of task vm space */
+	/* 所有vma中最大的结束地址 */
 	unsigned long highest_vm_end;		/* highest vma end address */
 	/* 指向页全局目录 */
 	pgd_t * pgd;
@@ -437,10 +450,10 @@ struct mm_struct {
 	
 	/* 线性区的自旋锁和页表的自旋锁 */
 	spinlock_t page_table_lock;		/* Protects page tables and some counters */
-	/* 线性区的读写信号量 */
+	/* 线性区的读写信号量，当需要对某个线性区进行操作时，会获取 */
 	struct rw_semaphore mmap_sem;
 
-	/* 用于链入双向链表中 */
+	/* 用于链入内核中所有mm_struct的双向链表中 */
 	struct list_head mmlist;		/* List of maybe swapped mm's.	These are globally strung
 						 * together off init_mm.mmlist, and are protected
 						 * by mmlist_lock
@@ -524,10 +537,12 @@ struct mm_struct {
 	 * new_owner->mm == mm
 	 * new_owner->alloc_lock is held
 	 */
+	/* 所属进程 */
 	struct task_struct __rcu *owner;
 #endif
 
 	/* store ref to file /proc/<pid>/exe symlink points to */
+	/* 代码段中映射的可执行文件的file，此文件路径会出现在/proc/进程ID/exe文件中 */
 	struct file *exe_file;
 #ifdef CONFIG_MMU_NOTIFIER
 	struct mmu_notifier_mm *mmu_notifier_mm;

@@ -1027,6 +1027,7 @@ struct address_space *page_file_mapping(struct page *page)
 	return page->mapping;
 }
 
+/* 检查page->mapping是否为空，如果不为空，最低位为0，该页为匿名页，指向对应的anon_vma(分配时需要对齐) */
 static inline int PageAnon(struct page *page)
 {
 	return ((unsigned long)page->mapping & PAGE_MAPPING_ANON) != 0;
@@ -1889,9 +1890,13 @@ extern unsigned long vm_mmap(struct file *, unsigned long,
 struct vm_unmapped_area_info {
 #define VM_UNMAPPED_AREA_TOPDOWN 1
 	unsigned long flags;
+	/* 要求长度 */
 	unsigned long length;
+	/* 起始地址 */
 	unsigned long low_limit;
+	/* 结束地址 */
 	unsigned long high_limit;
+	/* 对齐标志 */
 	unsigned long align_mask;
 	unsigned long align_offset;
 };
@@ -1908,12 +1913,18 @@ extern unsigned long unmapped_area_topdown(struct vm_unmapped_area_info *info);
  * - is at least the desired size.
  * - satisfies (begin_addr & align_mask) == (align_offset & align_mask)
  */
+/* 获取mmap区间中一段没有被映射的地址范围，返回起始地址 */
 static inline unsigned long
 vm_unmapped_area(struct vm_unmapped_area_info *info)
 {
+	/* 两种进程地址空间布局方式，一种是mmap区域向上增长，一种是mmap区域向下增长
+	 * 最新的是mmap区向下增长
+	 */
 	if (!(info->flags & VM_UNMAPPED_AREA_TOPDOWN))
+		/* mmap向上增长 */
 		return unmapped_area(info);
 	else
+		/* mmap向下增长 */
 		return unmapped_area_topdown(info);
 }
 

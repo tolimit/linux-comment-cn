@@ -74,11 +74,13 @@ static unsigned long mmap_rnd(void)
 	* 28 bits of randomness in 64bit mmaps, 40 address space bits
 	*/
 	if (current->flags & PF_RANDOMIZE) {
+		/* 使用了PF_RANDOMIZE标志，会获取一个范围内的随机数 */
 		if (mmap_is_ia32())
 			rnd = get_random_int() % (1<<8);
 		else
 			rnd = get_random_int() % (1<<28);
 	}
+	/* 返回随机数，如果没有PF_RANDOMIZE标志则是0 */
 	return rnd << PAGE_SHIFT;
 }
 
@@ -101,8 +103,11 @@ static unsigned long mmap_base(void)
 static unsigned long mmap_legacy_base(void)
 {
 	if (mmap_is_ia32())
+		/* 使用32位地址 */
 		return TASK_UNMAPPED_BASE;
 	else
+		/* 使用64位地址 */
+		/* TASK_UNMAPPED_BASE = (PAGE_ALIGN(TASK_SIZE / 3)) */
 		return TASK_UNMAPPED_BASE + mmap_rnd();
 }
 

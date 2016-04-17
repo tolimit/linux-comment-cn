@@ -22,7 +22,7 @@ static inline int page_is_file_cache(struct page *page)
 	return !PageSwapBacked(page);
 }
 
-/* 将页加入到lruvec中的lru类型的链表中 */
+/* 将页加入到lruvec中的lru类型的链表头部 */
 static __always_inline void add_page_to_lru_list(struct page *page,
 				struct lruvec *lruvec, enum lru_list lru)
 {
@@ -36,12 +36,16 @@ static __always_inline void add_page_to_lru_list(struct page *page,
 	__mod_zone_page_state(lruvec_zone(lruvec), NR_LRU_BASE + lru, nr_pages);
 }
 
+/* 将此页从lru链表中移除 */
 static __always_inline void del_page_from_lru_list(struct page *page,
 				struct lruvec *lruvec, enum lru_list lru)
 {
 	int nr_pages = hpage_nr_pages(page);
+	/* 更新统计，统计保存在lruvec对应的mem_cgroup_per_zone */
 	mem_cgroup_update_lru_size(lruvec, lru, -nr_pages);
+	/* 从lru中移除 */
 	list_del(&page->lru);
+	/* 更新统计，这里的是zone的统计 */
 	__mod_zone_page_state(lruvec_zone(lruvec), NR_LRU_BASE + lru, -nr_pages);
 }
 

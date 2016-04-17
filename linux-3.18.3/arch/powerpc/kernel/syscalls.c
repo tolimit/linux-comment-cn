@@ -68,6 +68,7 @@ unsigned long sys_mmap2(unsigned long addr, size_t len,
 	return do_mmap2(addr, len, prot, flags, fd, pgoff, PAGE_SHIFT-12);
 }
 
+/* ½øÐÐÓ³Éä */
 unsigned long sys_mmap(unsigned long addr, size_t len,
 		       unsigned long prot, unsigned long flags,
 		       unsigned long fd, off_t offset)

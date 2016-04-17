@@ -1754,6 +1754,7 @@ struct super_operations {
  */
 #define S_SYNC		1	/* Writes are synced at once */
 #define S_NOATIME	2	/* Do not update access times */
+/* inode是一个追加文件 */
 #define S_APPEND	4	/* Append-only file */
 #define S_IMMUTABLE	8	/* Immutable file */
 #define S_DEAD		16	/* removed, but still open directory */
