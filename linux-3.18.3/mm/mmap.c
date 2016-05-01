@@ -285,10 +285,14 @@ static struct vm_area_struct *remove_vma(struct vm_area_struct *vma)
 
 static unsigned long do_brk(unsigned long addr, unsigned long len);
 
+/* SYSCALL_DEFINEx，x代表参数个数 
+ * brk: 堆的大小
+ */
 SYSCALL_DEFINE1(brk, unsigned long, brk)
 {
 	unsigned long retval;
 	unsigned long newbrk, oldbrk;
+	/* 当前进程的mm_struct */
 	struct mm_struct *mm = current->mm;
 	unsigned long min_brk;
 	bool populate;
@@ -301,6 +305,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	 * randomize_va_space to 2, which will still cause mm->start_brk
 	 * to be arbitrarily shifted
 	 */
+	/* 如果设置了堆开始地址需要随机化，那么就使用当前堆的开始地址，否则使用数据段的结束地址 */
 	if (current->brk_randomized)
 		min_brk = mm->start_brk;
 	else
@@ -308,6 +313,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 #else
 	min_brk = mm->start_brk;
 #endif
+	/*  */
 	if (brk < min_brk)
 		goto out;
 
@@ -1230,6 +1236,7 @@ static struct anon_vma *reusable_anon_vma(struct vm_area_struct *old, struct vm_
  * 主要检查vma前后的vma是否连在一起(vma->vm_end == 前/后vma->vm_start)
  * vma->vm_policy和前/后vma->vm_policy
  * 是否都为文件映射，除了(VM_READ|VM_WRITE|VM_EXEC|VM_SOFTDIRTY)其他标志位是否相同，如果为文件映射，前/后vma映射的文件位置是否正好等于vma映射的文件 + vma的长度
+ * 还有near->anon_vma_chain中是否只有一个结点
  * 可以合并，则返回可合并的线性区的anon_vma
  */
 struct anon_vma *find_mergeable_anon_vma(struct vm_area_struct *vma)
@@ -1247,6 +1254,7 @@ struct anon_vma *find_mergeable_anon_vma(struct vm_area_struct *vma)
 	 * 主要检查vma和near是否连在一起(vma->vm_end == near->vm_start)
 	 * vma->vm_policy和near->vm_policy
 	 * 是否都为文件映射，除了(VM_READ|VM_WRITE|VM_EXEC|VM_SOFTDIRTY)其他标志位是否相同，如果为文件映射，near映射的文件位置是否正好等于vma映射的文件 + vma的长度
+	 * 还有near->anon_vma_chain中是否只有一个结点
 	 * 可以合并，则返回可合并的线性区的anon_vma
 	 */
 	anon_vma = reusable_anon_vma(near, vma, near);
@@ -2444,6 +2452,7 @@ static int acct_stack_growth(struct vm_area_struct *vma, unsigned long size, uns
  * PA-RISC uses this for its stack; IA64 for its Register Backing Store.
  * vma is the last one with address > vma->vm_end.  Have to extend vma.
  */
+/* vma向上扩展，address是目标地址 */
 int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 {
 	int error;
@@ -2519,6 +2528,10 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 /*
  * vma is the first one with address < vma->vm_start.  Have to extend vma.
  */
+/* 扩大进程栈大小，进程栈向下增长的情况
+ * vma: 当前进程栈的vma
+ * address: 产生缺页异常的address，并且 address < vma->vm_start 
+ */
 int expand_downwards(struct vm_area_struct *vma,
 				   unsigned long address)
 {
@@ -2528,14 +2541,23 @@ int expand_downwards(struct vm_area_struct *vma,
 	 * We must make sure the anon_vma is allocated
 	 * so that the anon_vma locking is not a noop.
 	 */
+	/* 为vma准备反向映射条件 
+ 	 * 检查此vma能与前后的vma进行合并吗，如果可以，则使用能够合并的那个vma的anon_vma，如果不能够合并，则申请一个空闲的anon_vma
+ 	 * 创建一个新的anon_vma_chain
+ 	 * 将avc->anon_vma指向获得的vma(此vma可能是新建的，也可能是可以合并的vma的anon_vma)，avc->vma指向vma，并把avc加入到vma的anon_vma_chain中
+ 	 */
+ 	 /* 如果栈已经在使用中，是栈空间不足导致需要向下增长的，那么这里基本不做任何工作，因为栈的vma已经有了anon_vma */
 	if (unlikely(anon_vma_prepare(vma)))
 		return -ENOMEM;
 
+	/* 获取目标address线性地址对应的页的起始地址 */
 	address &= PAGE_MASK;
+	/* 检查此地址是否合理 */
 	error = security_mmap_addr(address);
 	if (error)
 		return error;
 
+	/* 对anon_vma->root->rwsem上锁 */
 	vma_lock_anon_vma(vma);
 
 	/*
@@ -2545,14 +2567,19 @@ int expand_downwards(struct vm_area_struct *vma,
 	 */
 
 	/* Somebody else might have raced and expanded it already */
+	/* 因为是向下扩展，address一定会小于vma->vm_start，因为外面一层函数判断过了才会调用到此函数 */
 	if (address < vma->vm_start) {
 		unsigned long size, grow;
 
+		/* address到进程栈结束的大小范围，也就是栈扩大后最小的大小 */
 		size = vma->vm_end - address;
+		/* address到进程栈开始地址中间空出的大小(以页为单位) */
 		grow = (vma->vm_start - address) >> PAGE_SHIFT;
 
 		error = -ENOMEM;
 		if (grow <= vma->vm_pgoff) {
+			
+			/* 做检查 */
 			error = acct_stack_growth(vma, size, grow);
 			if (!error) {
 				/*
@@ -2566,12 +2593,18 @@ int expand_downwards(struct vm_area_struct *vma,
 				 * So, we reuse mm->page_table_lock to guard
 				 * against concurrent vma expansions.
 				 */
+				/* 对该进程页表上锁 */
 				spin_lock(&vma->vm_mm->page_table_lock);
+				/* 将此vma的anon_vma_chain链表上的结点从它们加入的红黑树中移除 */
 				anon_vma_interval_tree_pre_update_vma(vma);
+				/* 将此vma的开始线性地址设置为address */
 				vma->vm_start = address;
+				/* 将此vma的开始线性地址对应的虚拟页框号更新 */
 				vma->vm_pgoff -= grow;
+				/* 将此vma的anon_vma_chain链表上的结点重新加入到它们原本所属的红黑树中(通过avc->anon_vma->rb_root) */
 				anon_vma_interval_tree_post_update_vma(vma);
 				vma_gap_update(vma);
+				/* 解锁 */
 				spin_unlock(&vma->vm_mm->page_table_lock);
 
 				perf_event_mmap(vma);
@@ -2580,6 +2613,7 @@ int expand_downwards(struct vm_area_struct *vma,
 	}
 	vma_unlock_anon_vma(vma);
 	khugepaged_enter_vma_merge(vma, vma->vm_flags);
+	/* 更新vma所属mm_struct的vma红黑树 */
 	validate_mm(vma->vm_mm);
 	return error;
 }
@@ -2596,6 +2630,7 @@ int expand_downwards(struct vm_area_struct *vma,
  * removed under these circumstances.
  */
 #ifdef CONFIG_STACK_GROWSUP
+/* 扩大进程栈大小，进程栈是向上增长 */
 int expand_stack(struct vm_area_struct *vma, unsigned long address)
 {
 	struct vm_area_struct *next;
@@ -2625,6 +2660,7 @@ find_extend_vma(struct mm_struct *mm, unsigned long addr)
 	return prev;
 }
 #else
+/* 扩大进程栈大小，进程栈向下增长的情况 */
 int expand_stack(struct vm_area_struct *vma, unsigned long address)
 {
 	struct vm_area_struct *prev;

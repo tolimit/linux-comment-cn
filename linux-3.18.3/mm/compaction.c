@@ -618,6 +618,7 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 	/* 检查isolated是否小于LRU链表的(inactive + active) / 2，超过了则表示已经将许多页框隔离出来 */
 	while (unlikely(too_many_isolated(zone))) {
 		/* async migration should just abort */
+		/* 如果是异步模式，隔离出来的页多于(inactive + active) / 2，则直接返回 */
 		if (cc->mode == MIGRATE_ASYNC)
 			return 0;
 
@@ -723,7 +724,7 @@ isolate_migratepages_block(struct compact_control *cc, unsigned long low_pfn,
 		 * so avoid taking lru_lock and isolating it unnecessarily in an
 		 * admittedly racy check.
 		 */
-		/* 如果是一个匿名页，并且被引用次数大于page->_mapcount，则跳过此页，注释说此页很有可能被锁定在内存中不允许换出，但不知道如何判断的 */
+		/* 如果是一个匿名页，并且此页的page->_count大于page->_mapcount，此页应该处于在其他地方正在被隔离的时候 */
 		if (!page_mapping(page) &&
 		    page_count(page) > page_mapcount(page))
 			continue;
@@ -1158,7 +1159,12 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 	return cc->nr_migratepages ? ISOLATE_SUCCESS : ISOLATE_NONE;
 }
 
-/* 判断是否完成内存压缩 */
+/* 判断是否结束本次内存压缩 
+ * 1.可移动页框扫描的位置是否已经超过了空闲页框扫描的位置，超过则结束压缩
+ * 2.判断zone的空闲页框数量是否达到标准，如果没达到zone的low阀值标准则继续
+ * 3.判断伙伴系统中是否有比order值大的空闲连续页框块，有则结束压缩
+ * 如果是管理员写入到/proc/sys/vm/compact_memory进行强制内存压缩的情况，则判断条件只有第1条
+ */
 static int compact_finished(struct zone *zone, struct compact_control *cc,
 			    const int migratetype)
 {
@@ -1207,7 +1213,7 @@ static int compact_finished(struct zone *zone, struct compact_control *cc,
 	/* 下界加上需要分配的内存页框数量 */
 	watermark += (1 << cc->order);
 
-	/* 判断是否达到标准，没达到标准则继续，达到标准了则往下检查 */
+	/* 判断zone的空闲页框数量是否达到标准，如果没达到zone的low阀值标准则继续，达到标准了则往下检查 */
 	if (!zone_watermark_ok(zone, cc->order, watermark, 0, 0))
 		return COMPACT_CONTINUE;
 
@@ -1237,7 +1243,8 @@ static int compact_finished(struct zone *zone, struct compact_control *cc,
  *   COMPACT_PARTIAL  - If the allocation would succeed without compaction
  *   COMPACT_CONTINUE - If compaction should run now
  */
-/* COMPACT_SKIPPED  内存数量不足以支持进行内存压缩
+/* 检查此zone能否进行内存压缩
+ * COMPACT_SKIPPED  内存数量不足以支持进行内存压缩
  * COMPACT_PARTIAL  内存足够不需要进行内存压缩
  * COMPACT_CONTINUE 可以进行内存压缩
  */
@@ -1302,6 +1309,7 @@ static int compact_zone(struct zone *zone, struct compact_control *cc)
 	const int migratetype = gfpflags_to_migratetype(cc->gfp_mask);
 	/* 同步还是异步 
 	 * 同步为1，异步为0
+	 * 轻同步和同步都是同步
 	 */
 	const bool sync = cc->mode != MIGRATE_ASYNC;
 
@@ -1358,8 +1366,11 @@ static int compact_zone(struct zone *zone, struct compact_control *cc)
 	/* 将处于pagevec中的页都放回原本所属的lru中，这一步很重要 */
 	migrate_prep_local();
 
-	/* compact_finished用于判断是否已经完成内存压缩
-	 * 主要判断cc->free_pfn <= cc->migrate_pfn，并且没有发生错误，cc->contended中保存是否需要终止
+	/* 判断是否结束本次内存压缩 
+	 * 1.可移动页框扫描的位置是否已经超过了空闲页框扫描的位置，超过则结束压缩
+	 * 2.判断zone的空闲页框数量是否达到标准，如果没达到zone的low阀值标准则继续
+	 * 3.判断伙伴系统中是否有比order值大的空闲连续页框块，有则结束压缩
+	 * 如果是管理员写入到/proc/sys/vm/compact_memory进行强制内存压缩的情况，则判断条件只有第1条
 	 */
 	while ((ret = compact_finished(zone, cc, migratetype)) ==
 						COMPACT_CONTINUE) {

@@ -81,11 +81,16 @@ struct anon_vma_chain {
 };
 
 enum ttu_flags {
+	/* 对页进行unmap操作模式 */
 	TTU_UNMAP = 1,			/* unmap mode */
+	/* 对页进行迁移操作模式 */
 	TTU_MIGRATION = 2,		/* migration mode */
+	/* 对页进行munlock操作模式 */
 	TTU_MUNLOCK = 4,		/* munlock mode */
 
+	/* 忽略vma的mlock */
 	TTU_IGNORE_MLOCK = (1 << 8),	/* ignore mlock */
+	/* 忽略页表项的Accessed */
 	TTU_IGNORE_ACCESS = (1 << 9),	/* don't age */
 	TTU_IGNORE_HWPOISON = (1 << 10),/* corrupted page is recoverable */
 };
@@ -205,6 +210,10 @@ int try_to_unmap(struct page *, enum ttu_flags flags);
 pte_t *__page_check_address(struct page *, struct mm_struct *,
 				unsigned long, spinlock_t **, int);
 
+/* 检查page有没有映射到mm这个地址空间中
+ * address是page在此vma所属进程地址空间的线性地址，获取方法: address = vma->vm_pgoff + page->pgoff << PAGE_SHIFT;
+ * 通过线性地址address获取对应在此进程地址空间的页表项，然后通过页表项映射的页框号和page的页框号比较，则知道页表项是否映射了此page
+ */
 static inline pte_t *page_check_address(struct page *page, struct mm_struct *mm,
 					unsigned long address,
 					spinlock_t **ptlp, int sync)

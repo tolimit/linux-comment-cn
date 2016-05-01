@@ -112,16 +112,21 @@ static int remove_migration_pte(struct page *new, struct vm_area_struct *vma,
 	pte_t *ptep, pte;
  	spinlock_t *ptl;
 
+	/* 新的页是大页(新的页与旧的页大小一样，说明旧的页也是大页) */
 	if (unlikely(PageHuge(new))) {
 		ptep = huge_pte_offset(mm, addr);
 		if (!ptep)
 			goto out;
 		ptl = huge_pte_lockptr(hstate_vma(vma), mm, ptep);
 	} else {
+		/* 新的页是普通4k页 */
+		/* 这个addr是new和old在此进程地址空间中对应的线性地址，new和old会有同一个线性地址，因为new是old复制过来的 */
+		/* 获取线性地址addr对应的页中间目录项 */
 		pmd = mm_find_pmd(mm, addr);
 		if (!pmd)
 			goto out;
 
+		/* 根据页中间目录项和addr，获取对应的页表项指针 */
 		ptep = pte_offset_map(pmd, addr);
 
 		/*
@@ -129,51 +134,72 @@ static int remove_migration_pte(struct page *new, struct vm_area_struct *vma,
 		 * can race mremap's move_ptes(), which skips anon_vma lock.
 		 */
 
+		/* 获取页中间目录项的锁 */
 		ptl = pte_lockptr(mm, pmd);
 	}
 
+	/* 上锁 */
  	spin_lock(ptl);
+	/* 获取页表项内容 */
 	pte = *ptep;
+
+	/* 页表项内容不是swap类型的页表项内容(页迁移页表项属于swap类型的页表项)，则准备跳出 */
 	if (!is_swap_pte(pte))
 		goto unlock;
 
+	
+	/* 根据页表项内存转为swp_entry_t类型 */
 	entry = pte_to_swp_entry(pte);
 
+	/* 如果这个entry不是页迁移类型的entry，或者此entry指向的页不是旧页，那就说明有问题，准备跳出 */
 	if (!is_migration_entry(entry) ||
 	    migration_entry_to_page(entry) != old)
 		goto unlock;
 
+	/* 新页的page->_count++ */
 	get_page(new);
+	/* 根据新页new创建一个新的页表项内容 */
 	pte = pte_mkold(mk_pte(new, vma->vm_page_prot));
+	/* 这个好像跟numa有关，先不用理，无伤大雅 */
 	if (pte_swp_soft_dirty(*ptep))
 		pte = pte_mksoft_dirty(pte);
 
 	/* Recheck VMA as permissions can change since migration started  */
+	/* 如果获取的entry标记了映射页可写 */
 	if (is_write_migration_entry(entry))
+		/* 给新页的页表项增加可写标志 */
 		pte = maybe_mkwrite(pte, vma);
 
 #ifdef CONFIG_HUGETLB_PAGE
+	/* 大页的情况，先不看 */
 	if (PageHuge(new)) {
 		pte = pte_mkhuge(pte);
 		pte = arch_make_huge_pte(pte, vma, new, 0);
 	}
 #endif
 	flush_dcache_page(new);
+	/* 将设置好的新页的页表项内容写到对应页表项中，到这里，此页表项原来映射的是旧页，现在变成映射了新页了 */
 	set_pte_at(mm, addr, ptep, pte);
 
+	/* 大页，先不看 */
 	if (PageHuge(new)) {
 		if (PageAnon(new))
 			hugepage_add_anon_rmap(new, vma, addr);
 		else
 			page_dup_rmap(new);
+	/* 针对匿名页 */
 	} else if (PageAnon(new))
+		/* 主要对page->_count++，因为多了一个进程映射此页 */
 		page_add_anon_rmap(new, vma, addr);
 	else
+		/* 针对文件页，同样，也是对page->_count++，因为多了一个进程映射此页 */
 		page_add_file_rmap(new);
 
 	/* No need to invalidate - it was non-present before */
+	/* 刷新tlb */
 	update_mmu_cache(vma, addr, ptep);
 unlock:
+	/* 释放锁 */
 	pte_unmap_unlock(ptep, ptl);
 out:
 	return SWAP_AGAIN;
@@ -216,12 +242,16 @@ static int remove_linear_migration_ptes_from_nonlinear(struct page *page,
  */
 static void remove_migration_ptes(struct page *old, struct page *new)
 {
+	/* 反向映射控制结构 */
 	struct rmap_walk_control rwc = {
+		/* 每获取一个vma就会调用一次此函数 */
 		.rmap_one = remove_migration_pte,
+		/* rmap_one的最后一个参数为旧的页框 */
 		.arg = old,
 		.file_nonlinear = remove_linear_migration_ptes_from_nonlinear,
 	};
 
+	/* 反向映射遍历vma函数 */
 	rmap_walk(new, &rwc);
 }
 
@@ -237,15 +267,24 @@ static void __migration_entry_wait(struct mm_struct *mm, pte_t *ptep,
 	swp_entry_t entry;
 	struct page *page;
 
+	/* 上锁 */
 	spin_lock(ptl);
+	/* 页表项对应的页表项内容 */
 	pte = *ptep;
+	/* 不是对应的swap类型的页表项内容，则是错误的
+	 * 注意，页面迁移的页表项内容是属于swap类型
+	 * 但是页面迁移的entry类型是不属于swap类型
+	 */
 	if (!is_swap_pte(pte))
 		goto out;
 
+	/* 页表项内容转为swp_entry_t */
 	entry = pte_to_swp_entry(pte);
+	/* 如果不是页面迁移的entry类型，则错误 */
 	if (!is_migration_entry(entry))
 		goto out;
 
+	/* entry指定的页描述符，这个页是旧页的，也就是即将被移动的页 */
 	page = migration_entry_to_page(entry);
 
 	/*
@@ -255,10 +294,14 @@ static void __migration_entry_wait(struct mm_struct *mm, pte_t *ptep,
 	 * So, we use get_page_unless_zero(), here. Even failed, page fault
 	 * will occur again.
 	 */
+	/* 此页的page->_count++ */
 	if (!get_page_unless_zero(page))
 		goto out;
+	/* 释放锁 */
 	pte_unmap_unlock(ptep, ptl);
+	/* 如果此页的PG_locked置位了，则加入此页的等待队列，等待此位被清除 */
 	wait_on_page_locked(page);
+	/* 经过一段时间的阻塞，到这里PG_locked被清除了，page->_count-- */
 	put_page(page);
 	return;
 out:
@@ -268,8 +311,11 @@ out:
 void migration_entry_wait(struct mm_struct *mm, pmd_t *pmd,
 				unsigned long address)
 {
+	/* 获取锁(并不是上锁) */
 	spinlock_t *ptl = pte_lockptr(mm, pmd);
+	/* 获取发生缺页异常的对应页表项 */
 	pte_t *ptep = pte_offset_map(pmd, address);
+	/* 处理 */
 	__migration_entry_wait(mm, ptep, ptl);
 }
 
@@ -338,6 +384,10 @@ static inline bool buffer_migrate_lock_buffers(struct buffer_head *head,
  * 2 for pages with a mapping
  * 3 for pages with a mapping and PagePrivate/PagePrivate2 set.
  */
+/* 此函数主要工作就是如果旧页有加入到address_space的基树中，那么就用新页替换这个旧页的slot，新页替换旧页加入address_space的基树中
+ * 并且会同步旧匿名页的PG_swapcache标志和private指针内容到新页
+ * 对于未加入到swapcache中的匿名页，head = NULL，extra_count = 0 
+ */
 int migrate_page_move_mapping(struct address_space *mapping,
 		struct page *newpage, struct page *page,
 		struct buffer_head *head, enum migrate_mode mode,
@@ -346,6 +396,11 @@ int migrate_page_move_mapping(struct address_space *mapping,
 	int expected_count = 1 + extra_count;
 	void **pslot;
 
+	/* 这里主要判断未加入swapcache中的旧匿名页(page)
+	 * 对于未加入到swapcache中的旧匿名页，只要page->_count为1，就说明可以直接进行迁移
+	 * page->_count为1说明只有隔离函数对此进行了++，其他地方没有引用此页
+	 * page->_count为1，直接返回MIGRATEPAGE_SUCCESS
+	 */
 	if (!mapping) {
 		/* Anonymous page without mapping */
 		if (page_count(page) != expected_count)
@@ -353,11 +408,21 @@ int migrate_page_move_mapping(struct address_space *mapping,
 		return MIGRATEPAGE_SUCCESS;
 	}
 
+	/* 以下是对page->mapping不为空的情况 */
+
+	/* 对mapping中的基树上锁 */
 	spin_lock_irq(&mapping->tree_lock);
 
+	/* 获取此旧页所在基树中的slot */
 	pslot = radix_tree_lookup_slot(&mapping->page_tree,
  					page_index(page));
 
+
+	/* 对于加入了address_space的基树中的旧页
+	 * 判断page->_count是否为2 + page_has_private(page)
+	 * 如果正确，则往下一步走
+	 * 如果不是，可能此旧页被某个进程映射了
+	 */
 	expected_count += 1 + page_has_private(page);
 	if (page_count(page) != expected_count ||
 		radix_tree_deref_slot_protected(pslot, &mapping->tree_lock) != page) {
@@ -365,6 +430,10 @@ int migrate_page_move_mapping(struct address_space *mapping,
 		return -EAGAIN;
 	}
 
+	/* 这里再次判断，这里就只判断page->_count是否为2 + page_has_private(page)了
+	 * 是的话就继续往下走
+	 * 如果不是，可能此旧页被某个进程映射了
+	 */
 	if (!page_freeze_refs(page, expected_count)) {
 		spin_unlock_irq(&mapping->tree_lock);
 		return -EAGAIN;
@@ -387,18 +456,34 @@ int migrate_page_move_mapping(struct address_space *mapping,
 	/*
 	 * Now we know that no one else is looking at the page.
 	 */
+
+	/* 如果走到这，上面的代码得出一个结论，page是处于page->mapping指向的address_space的基树中的 
+	 * 所以以下要做的，就是用新页(newpage)数据替换旧页(page)数据所在的slot
+	 */
+
+	/* 新的页的newpage->_count++，因为后面要把新页替换旧页所在的slot */
 	get_page(newpage);	/* add cache reference */
+	/* 如果是匿名页，走到这，此匿名页必定已经加入了swapcache */
 	if (PageSwapCache(page)) {
+		/* 设置新页也在swapcache中，后面会替换旧页，新页就会加入到swapcache中 */
 		SetPageSwapCache(newpage);
+		/* 将旧页的private指向的地址复制到新页的private 
+		 * 对于加入了swapcache中的页，这项保存的都是以swap分区页槽为索引的swp_entry_t
+		 * 这里注意与在内存压缩时unmap时写入进程页表项的swp_entry_t的区别，在内存压缩时，写入进程页表项的swp_entry_t是以旧页(page)为索引
+		 */
 		set_page_private(newpage, page_private(page));
 	}
 
+	/* 用新页数据替换旧页的slot */
 	radix_tree_replace_slot(pslot, newpage);
 
 	/*
 	 * Drop cache reference from old page by unfreezing
 	 * to one less reference.
 	 * We know this isn't the last reference.
+	 */
+	/* 设置旧页的page->_count为expected_count - 1 
+	 * 这个-1是因为此旧页已经算是从address_space的基树中拿出来了
 	 */
 	page_unfreeze_refs(page, expected_count - 1);
 
@@ -412,6 +497,7 @@ int migrate_page_move_mapping(struct address_space *mapping,
 	 * via NR_FILE_PAGES and NR_ANON_PAGES if they
 	 * are mapped to swap space.
 	 */
+	/* 统计，注意，加入到swapcache中的匿名页，也算作NR_FILE_PAGES的数量 */
 	__dec_zone_page_state(page, NR_FILE_PAGES);
 	__inc_zone_page_state(newpage, NR_FILE_PAGES);
 	if (!PageSwapCache(page) && PageSwapBacked(page)) {
@@ -517,15 +603,23 @@ static void copy_huge_page(struct page *dst, struct page *src)
 /*
  * Copy the page to its new location
  */
+/* 将page页的内容复制的newpage
+ * 再对一些标志进行复制
+ */
 void migrate_page_copy(struct page *newpage, struct page *page)
 {
 	int cpupid;
 
 	if (PageHuge(page) || PageTransHuge(page))
+		/* 大页调用 */
 		copy_huge_page(newpage, page);
 	else
+		/* 普通页调用，主要就是通过永久映射分配给两个页内核的线性地址，然后做memcpy，将旧页内容拷贝到新页 
+	  	 * 对于64位机器，就没必要使用永久映射了，直接memcpy
+	  	 */
 		copy_highpage(newpage, page);
 
+	/* 对页标志的复制 */
 	if (PageError(page))
 		SetPageError(newpage);
 	if (PageReferenced(page))
@@ -542,7 +636,9 @@ void migrate_page_copy(struct page *newpage, struct page *page)
 	if (PageMappedToDisk(page))
 		SetPageMappedToDisk(newpage);
 
+	/* 如果页标记了脏页 */
 	if (PageDirty(page)) {
+		/* 清除旧页的脏页标志 */
 		clear_page_dirty_for_io(page);
 		/*
 		 * Want to mark the page and the radix tree as dirty, and
@@ -551,6 +647,7 @@ void migrate_page_copy(struct page *newpage, struct page *page)
 		 * is actually a signal that all of the page has become dirty.
 		 * Whereas only part of our page may be dirty.
 		 */
+		/* 设置新页的脏页标志 */
 		if (PageSwapBacked(page))
 			SetPageDirty(newpage);
 		else
@@ -561,15 +658,20 @@ void migrate_page_copy(struct page *newpage, struct page *page)
 	 * Copy NUMA information to the new page, to prevent over-eager
 	 * future migrations of this same page.
 	 */
+	/* 还是复制一些标志 */
 	cpupid = page_cpupid_xchg_last(page, -1);
 	page_cpupid_xchg_last(newpage, cpupid);
 
+	/* 这里也是做一些标志的复制 
+	 * 主要是PG_mlocked和ksm的stable_node
+	 */
 	mlock_migrate_page(newpage, page);
 	ksm_migrate_page(newpage, page);
 	/*
 	 * Please do not reorder this without considering how mm/ksm.c's
 	 * get_ksm_page() depends upon ksm_migrate_page() and PageSwapCache().
 	 */
+	/* 清除旧页的几个标志，这几个标志在之前都赋给了新页了 */
 	ClearPageSwapCache(page);
 	ClearPagePrivate(page);
 	set_page_private(page, 0);
@@ -578,6 +680,7 @@ void migrate_page_copy(struct page *newpage, struct page *page)
 	 * If any waiters have accumulated on the new page then
 	 * wake them up.
 	 */
+	/* 这里主要用于唤醒等待新页的等待者 */
 	if (PageWriteback(newpage))
 		end_page_writeback(newpage);
 }
@@ -592,19 +695,29 @@ void migrate_page_copy(struct page *newpage, struct page *page)
  *
  * Pages are locked upon entry and exit.
  */
+/* 未加入到swapcache和加入到swapcache中的匿名页都会在这里进行页面迁移 */
 int migrate_page(struct address_space *mapping,
 		struct page *newpage, struct page *page,
 		enum migrate_mode mode)
 {
 	int rc;
 
+	/* 页都没加入到swapcache，更不可能会正在进行回写 */
 	BUG_ON(PageWriteback(page));	/* Writeback must be complete */
 
+	/* 此函数主要工作就是如果旧页有加入到address_space的基树中，那么就用新页替换这个旧页的slot，新页替换旧页加入address_space的基树中
+ 	 * 并且会同步旧匿名页的PG_swapcache标志和private指针内容到新页
+	 * 对旧页会page->_count--(从基树中移除)
+	 * 对新页会page->_count++(加入到基树中)
+	 */
 	rc = migrate_page_move_mapping(mapping, newpage, page, NULL, mode, 0);
 
 	if (rc != MIGRATEPAGE_SUCCESS)
 		return rc;
-
+	
+	/* 将page页的内容复制的newpage
+	 * 再对一些标志进行复制
+	 */
 	migrate_page_copy(newpage, page);
 	return MIGRATEPAGE_SUCCESS;
 }
@@ -757,17 +870,27 @@ static int move_to_new_page(struct page *newpage, struct page *page,
 	 * establishing additional references. We are the only one
 	 * holding a reference to the new page at this point.
 	 */
+	/* 对新页上锁，这里应该100%上锁成功，因为此页是新的，没有任何进程和模块使用 */
 	if (!trylock_page(newpage))
 		BUG();
 
 	/* Prepare mapping for the new page.*/
+	/* 将旧页的index、mapping和PG_swapbacked标志复制到新页 
+	 * 对于复制index和mapping有很重要的意义
+	 * 通过index和mapping，就可以对新页进行反向映射了，当新页配置好后，对新页进行反向映射，找到的就是映射了旧页的进程，然后将它们的对应页表项映射到新页
+	 */
 	newpage->index = page->index;
 	newpage->mapping = page->mapping;
 	if (PageSwapBacked(page))
 		SetPageSwapBacked(newpage);
 
+	/* 获取旧页的mapping */
 	mapping = page_mapping(page);
+	/* 如果mapping为空，则执行默认的migrate_page() 
+	 * 注意到这里时，映射了此页的进程已经对此页进行了unmap操作，而进程对应的页表项被设置为了指向page(而不是newpage)的swp_entry_t
+	 */
 	if (!mapping)
+		/* 未加入到swapcache中的匿名页会在这里进行页面迁移 */
 		rc = migrate_page(mapping, newpage, page, mode);
 	else if (mapping->a_ops->migratepage)
 		/*
@@ -776,20 +899,29 @@ static int move_to_new_page(struct page *newpage, struct page *page,
 		 * space which also has its own migratepage callback. This
 		 * is the most common path for page migration.
 		 */
+		/* 文件页，和加入到swapcache中的匿名页，都会到这里 
+		 * 对于匿名页，调用的是swap_aops->migrate_page()函数，而这个函数，实际上就是上面的migrate_page()函数
+		 * 根据文件系统的不同，这里可能会对脏文件页造成回写，只有同步模式才能进行回写
+		 */
 		rc = mapping->a_ops->migratepage(mapping,
 						newpage, page, mode);
 	else
+		/* 当文件页所在的文件系统没有支持migratepage()函数时，会调用这个默认的函数，里面会对脏文件页进行回写，只有同步模式才能进行 */
 		rc = fallback_migrate_page(mapping, newpage, page, mode);
 
 	if (rc != MIGRATEPAGE_SUCCESS) {
 		newpage->mapping = NULL;
 	} else {
 		mem_cgroup_migrate(page, newpage, false);
+		/* 这个remap_swapcache默认就是1
+		 * 这里做的工作就是将之前映射了旧页的页表项，统统改为映射到新页，会使用到反向映射
+		 */
 		if (remap_swapcache)
 			remove_migration_ptes(page, newpage);
 		page->mapping = NULL;
 	}
 
+	/* 释放newpage的PG_locked标志 */
 	unlock_page(newpage);
 
 	return rc;
@@ -802,8 +934,14 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 	int remap_swapcache = 1;
 	struct anon_vma *anon_vma = NULL;
 
+	/* 获取这个page锁(PG_locked标志)是关键，是整个回收过程中同步的保证 
+	 * 当我们对所有映射了此页的进程进行unmap操作时，会给它们一个特殊的页表项
+	 * 当这些进程再次访问此页时，会由于访问了这个特殊的页表项进入到缺页异常，然后在缺页异常中等待此页的这个锁释放
+	 * 当此页的这个锁释放时，页面迁移已经完成了，这些进程的此页表项已经在释放锁前就映射到了新页上，这时候已经可以唤醒这些等待着此页的锁的进程
+	 * 这些进程下次访问此页表项时，就是访问到了新页
+	 */
 	if (!trylock_page(page)) {
-		/* 异步一定需要锁 */
+		/* 异步此时一定需要拿到锁，否则就返回，因为下面还有一个lock_page(page)获取锁，这个有可能会导致阻塞等待 */
 		if (!force || mode == MIGRATE_ASYNC)
 			goto out;
 
@@ -823,10 +961,11 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 		if (current->flags & PF_MEMALLOC)
 			goto out;
 
+		/* 同步和轻同步的情况下，都有可能会为了拿到这个锁而阻塞在这 */
 		lock_page(page);
 	}
 
-	/* 此页需要写回到磁盘 */
+	/* 此页正在回写到磁盘 */
 	if (PageWriteback(page)) {
 		/*
 		 * Only in the case of a full synchronous migration is it
@@ -834,13 +973,14 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 		 * the retry loop is too short and in the sync-light case,
 		 * the overhead of stalling is too much
 		 */
+		/* 异步和轻同步模式都不会等待 */
 		if (mode != MIGRATE_SYNC) {
 			rc = -EBUSY;
 			goto out_unlock;
 		}
 		if (!force)
 			goto out_unlock;
-		/* 等待此页回写 */
+		/* 同步模式下，等待此页回写完成 */
 		wait_on_page_writeback(page);
 	}
 	/*
@@ -857,11 +997,11 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 		 * Only page_lock_anon_vma_read() understands the subtleties of
 		 * getting a hold on an anon_vma from outside one of its mms.
 		 */
-		/* 获取此页所在的vma */
+		/* 获取匿名页所指向的anon_vma，如果是文件页，则返回NULL */
 		anon_vma = page_get_anon_vma(page);
 		if (anon_vma) {
 			/*
-			 * Anon page
+			 * 此页是匿名页，不做任何处理
 			 */
 		} else if (PageSwapCache(page)) {
 			/*
@@ -876,6 +1016,7 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 			 * migrated but are not remapped when migration
 			 * completes
 			 */
+			/* 此页是已经加入到swapcache，并且进行过unmap的匿名页(因为anon_vma为空才会到这里)，现在已经没有进程映射此页 */
 			remap_swapcache = 0;
 		} else {
 			goto out_unlock;
@@ -907,9 +1048,15 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 	 * invisible to the vm, so the page can not be migrated.  So try to
 	 * free the metadata, so the page can be freed.
 	 */
+	/* page->mapping为空的情况，有两种情况
+	 * 1.此页是已经加入到swapcache，并且进行过unmap的匿名页，现在已经没有进程映射此页
+	 * 2.一些特殊的页，这些页page->mapping为空，但是page->private指向一个buffer_head链表(日志缓冲区使用的页?)
+	 */
 	if (!page->mapping) {
 		VM_BUG_ON_PAGE(PageAnon(page), page);
+		/* page->private有buffer_head */
 		if (page_has_private(page)) {
+			/* 释放此页所有的buffer_head，之后此页将被回收 */
 			try_to_free_buffers(page);
 			goto out_unlock;
 		}
@@ -917,14 +1064,22 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 	}
 
 	/* Establish migration ptes or remove ptes */
-	/* umap此页 */
+	/* umap此页，会为映射了此页的进程创建一个迁移使用的swp_entry_t，这个swp_entry_t指向的页就是此page 
+	 * 将此swp_entry_t替换映射了此页的页表项
+	 * 然后对此页的页描述符的_mapcount进行--操作，表明反向映射到的一个进程取消了映射
+	 */
 	try_to_unmap(page, TTU_MIGRATION|TTU_IGNORE_MLOCK|TTU_IGNORE_ACCESS);
 
 skip_unmap:
-	/* 将page的内容复制到newpage中，会进行将newpage重新映射到page所属进程的pte中 */
+	/* 先判断还有没有进程映射了此页，没有才继续
+	 * 将page的内容复制到newpage中，会进行将newpage重新映射到page所属进程的pte中 
+	 */
 	if (!page_mapped(page))
 		rc = move_to_new_page(newpage, page, remap_swapcache, mode);
 
+	/* 当在move_to_new_page()中进行remove_migration_ptes()失败时，这里才会执行 
+	 * 这里是将所有映射了旧页的进程页表项再重新映射到旧页上，也就是本次内存迁移失败了。
+	 */
 	if (rc && remap_swapcache)
 		remove_migration_ptes(page, page);
 
@@ -933,6 +1088,10 @@ skip_unmap:
 		put_anon_vma(anon_vma);
 
 out_unlock:
+	/* 释放此页的锁(PG_locked清除)
+	 * 在unmap后，所有访问此页的进程都会阻塞在这里，等待此锁释放
+	 * 这里释放后，所有访问此页的进程都会被唤醒
+	 */
 	unlock_page(page);
 out:
 	return rc;
@@ -942,7 +1101,9 @@ out:
  * Obtain the lock on page, remove all ptes and migrate the page
  * to the newly allocated page in newpage.
  */
-/* 从get_new_page中获取一个新页，然后将page取消映射，并把page的数据复制到新页上 */
+/* 从get_new_page中获取一个新页，然后将page取消映射，并把page的数据复制到新页上 
+ * 这里处理的是普通4k大小的页
+ */
 static int unmap_and_move(new_page_t get_new_page, free_page_t put_new_page,
 			unsigned long private, struct page *page, int force,
 			enum migrate_mode mode)
@@ -952,10 +1113,11 @@ static int unmap_and_move(new_page_t get_new_page, free_page_t put_new_page,
 	/* 获取一个空闲页，具体见compaction_alloc() */
 	struct page *newpage = get_new_page(page, private, &result);
 
+	/* 获取失败，返回-ENOMEM */
 	if (!newpage)
 		return -ENOMEM;
 
-	/* 如果此页在期间被释放为空闲页了，则跳过此页 */
+	/* 如果此页的page->_count为1，则跳到out，因为此页在out中就会被释放，这个1是隔离的时候加上的，也就是说此页现在没有进程在映射，也没有加到address_space的基树中 */
 	if (page_count(page) == 1) {
 		/* page was freed from under us. So we are done. */
 		goto out;
@@ -965,7 +1127,9 @@ static int unmap_and_move(new_page_t get_new_page, free_page_t put_new_page,
 		if (unlikely(split_huge_page(page)))
 			goto out;
 
-	/* 将page取消映射，并把page的数据复制到newpage中 */
+	/* 将page取消映射，并把page的数据复制到newpage中
+	 * 同步会等待那些正在回写的页回写结束，轻同步不会等待
+	 */
 	rc = __unmap_and_move(page, newpage, force, mode);
 
 out:

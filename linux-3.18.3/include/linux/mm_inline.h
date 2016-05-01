@@ -17,6 +17,7 @@
  * needs to survive until the page is last deleted from the LRU, which
  * could be as far down as __page_cache_release.
  */
+/* 判断页是否是文件页，通过PageSwapBacked判断此页是否需要用到swap，需要则是匿名页 */
 static inline int page_is_file_cache(struct page *page)
 {
 	return !PageSwapBacked(page);
@@ -30,7 +31,7 @@ static __always_inline void add_page_to_lru_list(struct page *page,
 	int nr_pages = hpage_nr_pages(page);
 	/* 更新lruvec中lru类型的链表的页数量 */
 	mem_cgroup_update_lru_size(lruvec, lru, nr_pages);
-	/* 加入到LRU链表前面，这里不上锁，所以在调用此函数前需要上锁 */
+	/* 加入到对应LRU链表头部，这里不上锁，所以在调用此函数前需要上锁 */
 	list_add(&page->lru, &lruvec->lists[lru]);
 	/* 更新统计 */
 	__mod_zone_page_state(lruvec_zone(lruvec), NR_LRU_BASE + lru, nr_pages);
@@ -100,10 +101,13 @@ static __always_inline enum lru_list page_lru(struct page *page)
 {
 	enum lru_list lru;
 
+	/* 通过PG_unevictable标志判断此页是否被锁在内存中 */
 	if (PageUnevictable(page))
 		lru = LRU_UNEVICTABLE;
 	else {
+		/* 获取页的类型，通过PageSwapBacked判断此页是否依靠swap分区，如果依靠，则需要加入匿名页lru链表，否则加入文件页lru链表 */
 		lru = page_lru_base_type(page);
+		/* 判断此页是否是活动页，主要通过PG_active标志 */
 		if (PageActive(page))
 			lru += LRU_ACTIVE;
 	}

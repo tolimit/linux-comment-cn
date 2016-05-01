@@ -307,10 +307,7 @@ struct address_space *page_mapping(struct page *page)
 	if (unlikely(PageSlab(page)))
 		return NULL;
 
-	/* 此页用于swap cache时的处理，swap cache用于保存匿名页，但是当你用malloc分配内存的 
-	 * 时候，并不马上放到swap cache中，而是在进程中不再使用该内存的 
-	 * 时候它才被读入swap cache中。这些页对应的文件会为swapfile
-	 */
+	/* 此页已经在swapcache中 */
 	if (unlikely(PageSwapCache(page))) {
 		swp_entry_t entry;
 

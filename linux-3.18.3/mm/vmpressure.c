@@ -208,6 +208,7 @@ static void vmpressure_work_fn(struct work_struct *work)
  *
  * This function does not return any value.
  */
+/* 计算内存压力，保存到memcg->vmpressure */
 void vmpressure(gfp_t gfp, struct mem_cgroup *memcg,
 		unsigned long scanned, unsigned long reclaimed)
 {
@@ -260,6 +261,7 @@ void vmpressure(gfp_t gfp, struct mem_cgroup *memcg,
  *
  * This function does not return any value.
  */
+/* 通过回收优先级判断内存压力 */
 void vmpressure_prio(gfp_t gfp, struct mem_cgroup *memcg, int prio)
 {
 	/*

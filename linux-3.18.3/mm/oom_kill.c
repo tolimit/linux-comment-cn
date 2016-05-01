@@ -307,6 +307,7 @@ static struct task_struct *select_bad_process(unsigned int *ppoints,
 	unsigned long chosen_points = 0;
 
 	rcu_read_lock();
+	/* 扫描所有进程描述符 */
 	for_each_process_thread(g, p) {
 		unsigned int points;
 

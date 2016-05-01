@@ -334,21 +334,28 @@ typedef int (*read_actor_t)(read_descriptor_t *, struct page *,
 		unsigned long, unsigned long);
 
 struct address_space_operations {
+	/* 写操作(从页写到对应的的磁盘映像) */
 	int (*writepage)(struct page *page, struct writeback_control *wbc);
+	/* 读操作(从对应的磁盘映像读到页) */
 	int (*readpage)(struct file *, struct page *);
 
 	/* Write back some dirty pages from this mapping. */
+	/* 把指定数量的address_space脏页写回磁盘 */
 	int (*writepages)(struct address_space *, struct writeback_control *);
 
 	/* Set a page dirty.  Return true if this dirtied it */
+	/* 把address_space中的指定页设置为脏页 */
 	int (*set_page_dirty)(struct page *page);
 
+	/* 从磁盘读连续的页到pages链表 */
 	int (*readpages)(struct file *filp, struct address_space *mapping,
 			struct list_head *pages, unsigned nr_pages);
 
+	/* 为写操作做准备 */
 	int (*write_begin)(struct file *, struct address_space *mapping,
 				loff_t pos, unsigned len, unsigned flags,
 				struct page **pagep, void **fsdata);
+	/* 为读操作做准备 */
 	int (*write_end)(struct file *, struct address_space *mapping,
 				loff_t pos, unsigned len, unsigned copied,
 				struct page *page, void *fsdata);
@@ -356,8 +363,10 @@ struct address_space_operations {
 	/* Unfortunately this kludge is needed for FIBMAP. Don't use it */
 	sector_t (*bmap)(struct address_space *, sector_t);
 	void (*invalidatepage) (struct page *, unsigned int, unsigned int);
+	/* 由日志文件系统使用以准备释放页 */
 	int (*releasepage) (struct page *, gfp_t);
 	void (*freepage)(struct page *);
+	/* 页将使用直接IO传输 */
 	ssize_t (*direct_IO)(int, struct kiocb *, struct iov_iter *iter, loff_t offset);
 	int (*get_xip_mem)(struct address_space *, pgoff_t, int,
 						void **, unsigned long *);
@@ -396,18 +405,21 @@ int pagecache_write_end(struct file *, struct address_space *mapping,
 struct backing_dev_info;
 /* 如果当内核打开一个文件后，会生成一个struct inode，其中i_mapping指向一个struct address_space
  * 但是并不只是可以用于inode，具体见ULK第15章
- * 一个文件可能在内存中有很多个页(分散)，这些页都会链接到同一个address_space中
+ * 可能会出现两个address_space结构引用了两个不同的页中出现相同的磁盘数据(一种是以文件进行读写，另一种是直接从设备文件读取磁盘块)
+ * 一个文件可能在内存中有很多个页(分散)，这些页都会链接到同一个address_space中的page_tree
+ * 每个swap分区都有一个自己的address_space，它们保存在swapper_spaces数组中
  */
 struct address_space {
 	/* 所属inode */
 	struct inode		*host;		/* owner: inode, block_device */
-	/* 所属inode的所有页组成的基树的根 */
+	/* 指向所属inode的所有页组成的基树的根 */
+	/* 如果此address_space是swap分区的， */
 	struct radix_tree_root	page_tree;	/* radix tree of all pages */
 	/* 基树的自旋锁 */
 	spinlock_t		tree_lock;	/* and lock protecting it */
 	/* 地址空间中共享内存映射的个数 */
 	atomic_t		i_mmap_writable;/* count VM_SHARED mappings */
-	/* 红黑树的根 */
+	/* 红黑树的根，用于将所有映射了此文件的vma组织起来 */
 	struct rb_root		i_mmap;		/* tree of private and shared mappings */
 	/* 地址空间中非线性内存区的链表 */
 	struct list_head	i_mmap_nonlinear;/*list VM_NONLINEAR mappings */

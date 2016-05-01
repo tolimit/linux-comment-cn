@@ -1157,7 +1157,9 @@ __do_page_fault(struct pt_regs *regs, unsigned long error_code,
 	if (unlikely(fault_in_kernel_space(address))) {
 		/* 发生缺页异常的页在内核地址空间 */
 		if (!(error_code & (PF_RSVD | PF_USER | PF_PROT))) {
-			/* 发生在非连续物理内存区的处理，整个处理就是把主内核页表的address对应的页目录项复制给当前进程的页表 */
+			/* 发生在非连续物理内存区的处理，整个处理就是把主内核页表的address对应的页目录项复制给当前进程的页表 
+			 * 原因是当发生非连续物理内存区映射时，只映射了主内核页表的address对应的页目录项~页表项，当其他进程访问这个地址时，产生缺页异常，然后先检查主内核页表此项是否有设置，有则复制过来
+			 */
 			if (vmalloc_fault(address) >= 0)
 				return;
 
@@ -1273,7 +1275,7 @@ retry:
 		might_sleep();
 	}
 
-	/* 根据adress获取线性区描述符，因为这里处理的都是用户地址空间的缺页异常，基本都能获取到 */
+	/* 查找包含着给定地址addr的vma线性区，如果没有，也有可能找到离addr最近的下一个vma线性区 */
 	vma = find_vma(mm, address);
 	if (unlikely(!vma)) {
 		/* 没有匹配的线性区，进行错误处理 */
@@ -1303,7 +1305,7 @@ retry:
 			return;
 		}
 	}
-	/* 需要扩展用户栈的情况处理 */
+	/* 需要扩展用户栈大小的情况处理 */
 	if (unlikely(expand_stack(vma, address))) {
 		bad_area(regs, error_code, address);
 		return;

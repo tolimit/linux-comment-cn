@@ -766,6 +766,9 @@ void end_page_writeback(struct page *page)
 	 */
 	if (PageReclaim(page)) {
 		ClearPageReclaim(page);
+		/* page->_count++
+		 * 页会放到非活动lru链表末尾
+		 */
 		rotate_reclaimable_page(page);
 	}
 

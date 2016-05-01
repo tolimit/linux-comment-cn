@@ -121,21 +121,31 @@ struct zone_padding {
 enum zone_stat_item {
 	/* First 128 byte cacheline (assuming 64 bit words) */
 	NR_FREE_PAGES,
+	/* 可用于分配给，这个意思是分配是内存分配本来打算从另一个zone分配的，但是那个zone内存不足以分配，所以在这个zone分配了内存 
+	 * 但是这个zone也不能你们其他zone没内存了，就都来我这里分配，这个值就是允许进行这种分配的页数量
+	 * 当此值为0时，会增加 zone的high阀值 - zone的low阀值 数量的页给它
+	 */
 	NR_ALLOC_BATCH,
 	NR_LRU_BASE,
+	/* 非活动匿名页lru链表，会加入的除了匿名页还有shmem用的页 */
 	NR_INACTIVE_ANON = NR_LRU_BASE, /* must match order of LRU_[IN]ACTIVE */
+	/* 非活动匿名页lru链表，会加入的除了匿名页还有shmem用的页 */
 	NR_ACTIVE_ANON,		/*  "     "     "   "       "         */
 	NR_INACTIVE_FILE,	/*  "     "     "   "       "         */
 	NR_ACTIVE_FILE,		/*  "     "     "   "       "         */
 	NR_UNEVICTABLE,		/*  "     "     "   "       "         */
 	NR_MLOCK,		/* mlock()ed pages found and moved off LRU */
+	/* 已经映射的匿名页 */
 	NR_ANON_PAGES,	/* Mapped anonymous pages */
 	NR_FILE_MAPPED,	/* pagecache pages mapped into pagetables.
 			   only modified from process context */
-	NR_FILE_PAGES,
+	NR_FILE_PAGES,	/* zone中加入到page cache中的页数量，当一个页准备要被换到swap中时，会先加入swapcache(swap的address_space)，这时候这个统计会++ */
+	/* 脏页数量 */
 	NR_FILE_DIRTY,
 	NR_WRITEBACK,
+	/* 可回收slab占用的页数量 */
 	NR_SLAB_RECLAIMABLE,
+	/* 不可回收slab占用的页数量 */
 	NR_SLAB_UNRECLAIMABLE,
 	NR_PAGETABLE,		/* used for pagetables */
 	NR_KERNEL_STACK,
@@ -152,8 +162,11 @@ enum zone_stat_item {
 	NR_WRITTEN,		/* page writings since bootup */
 	NR_PAGES_SCANNED,	/* pages scanned since last reclaim */
 #ifdef CONFIG_NUMA
+	/* 分配的页框所在zone在期望的node上的计数，这个计数会记在分配了页框的zone中 */
 	NUMA_HIT,		/* allocated in intended node */
+	/* 分配的页框所在zone在不在期望的node上的计数，这个miss计数会记在期望的zone中 */
 	NUMA_MISS,		/* allocated in non intended node */
+	/* 期待在此zone分配，然后没办法，在其他node的zone中分配到了内存，这里记次数 */
 	NUMA_FOREIGN,		/* was intended here, hit elsewhere */
 	NUMA_INTERLEAVE_HIT,	/* interleaver preferred this zone */
 	NUMA_LOCAL,		/* allocation from local node */
@@ -163,6 +176,7 @@ enum zone_stat_item {
 	WORKINGSET_ACTIVATE,
 	WORKINGSET_NODERECLAIM,
 	NR_ANON_TRANSPARENT_HUGEPAGES,
+	/* 空闲的CMA页框数量 */
 	NR_FREE_CMA_PAGES,
 	NR_VM_ZONE_STAT_ITEMS };
 
@@ -221,12 +235,19 @@ struct zone_reclaim_stat {
 	 *
 	 * The anon LRU stats live in [0], file LRU stats in [1]
 	 */
-	/* rotated用于活动链表? 
-	 * 在mark_page_accessed()中将页加入到活动页lru链表时此值会++
+	 /* 
+	  * 以下两个数组中，匿名页lru统计保存在[0]，文件页lru统计保存在[1]
+	  */
+	/* 最近加入到活动lru链表的页数量
+	 * 从非活动lru链表中重新加入活动lru链表的页数量
+	 * 从活动lru链表中移动到活动lru链表头部的页(代码段的页)
+	 * 新加入到活动lru链表中的页
 	 */
 	unsigned long		recent_rotated[2];
-	/* 最近扫描的页数量，或者是总体的页数量 
+	/* 
+	 * 最近扫描过的页数量
 	 * 在mark_page_accessed()中将页加入到活动页lru链表时此值会++
+	 * 当从inactive_lru中隔离出一些页用于释放时，此值会加上这些隔离出来的页的数量
 	 */
 	unsigned long		recent_scanned[2];
 };
@@ -239,6 +260,7 @@ struct zone_reclaim_stat {
  * LRU_UNEVICTABLE,
  */
 struct lruvec {
+	/* 5个lru链表头 */
 	struct list_head lists[NR_LRU_LISTS];
 	struct zone_reclaim_stat reclaim_stat;
 #ifdef CONFIG_MEMCG
@@ -256,7 +278,7 @@ struct lruvec {
 /* 只隔离干净的页 */
 #define ISOLATE_CLEAN		((__force isolate_mode_t)0x1)
 /* Isolate unmapped file */
-/* 隔离未映射文件页(是否为匿名页) */
+/* 隔离未映射页 */
 #define ISOLATE_UNMAPPED	((__force isolate_mode_t)0x2)
 /* Isolate for asynchronous migration */
 /* 隔离用于异步内存迁移 */
@@ -369,6 +391,8 @@ struct zone {
 	 * pages_high: 回收页框使用的上界，同时也被管理区分配器作为阀值使用，一般这个数字是pages_min的3/2
 	 */
 	/* pages_min < page_low < page_high
+	 * 快速内存分配期间，会用low
+	 * 慢速内存分配期间，会用min
 	 * 当可用页框数量小于pages_high时会调用kswapd
 	 */
 	unsigned long watermark[NR_WMARK];
@@ -381,7 +405,9 @@ struct zone {
 	 * on the higher zones). This array is recalculated at runtime if the
 	 * sysctl_lowmem_reserve_ratio sysctl changes.
 	 */
-	/* 指明在处理内存不足的临界情况下管理区必须保留的页框数目，同时也用于在中断或临界区发出的原子内存分配请求(就是禁止阻塞的内存分配请求) */
+	/* 指明在处理内存不足的临界情况下管理区必须保留的页框数目，同时也用于在中断或临界区发出的原子内存分配请求(就是禁止阻塞的内存分配请求)
+	 * 有ALLOC_NO_WATERMARKS标志才可以使用的内存
+	 */
 	long lowmem_reserve[MAX_NR_ZONES];
 
 #ifdef CONFIG_NUMA
@@ -394,7 +420,18 @@ struct zone {
 	 * this zone's LRU.  Maintained by the pageout code.
 	 */
 	/* 在swap时用于zone判断非活动匿名页是否处于低阀值，inactive * zone->inactive_ratio < active，如果成立，那么zone的非活动匿名页属于low水平
-	 * linux中会将一个zone的25%的匿名页放到zone的inactive_anon_lru链表中
+	 */
+	/* 经验公式ratio等于 根号(10 * 管理区内存以GB为大小的数量): 
+	 * total 	target	  max
+	 * memory 	ratio	  inactive anon
+	 * -------------------------------------
+	 *	10MB	   1		 5MB
+	 *  100MB	   1		50MB
+	 *	 1GB	   3	   250MB
+	 *	10GB	  10	   0.9GB
+	 *  100GB	  31		 3GB
+	 *	 1TB	 101		10GB
+	 *	10TB	 320		32GB
 	 */
 	unsigned int inactive_ratio;
 
@@ -422,7 +459,9 @@ struct zone {
 	/*
 	 * zone reclaim becomes active if more unmapped pages exist.
 	 */
+	/* 此zone的可回收内存页数量必须要超过此值，才能进行内存回收 */
 	unsigned long		min_unmapped_pages;
+	/* 此zone可回收slab页数量大于此数，才能进行slab回收 */
 	unsigned long		min_slab_pages;
 #endif /* CONFIG_NUMA */
 
@@ -553,8 +592,11 @@ struct zone {
 	/* Write-intensive fields used by page reclaim */
 
 	/* Fields commonly accessed by the page reclaim scanner */
-	/* 活动及非活动链表使用的自旋锁 */
+	/* lru链表使用的自旋锁 
+	 * 当需要修改lru链表描述符中任何一个链表时，都需要持有此锁，也就是说，不会有两个不同的lru链表同时进行修改
+	 */
 	spinlock_t		lru_lock;
+	/* lru链表描述符 */
 	struct lruvec		lruvec;
 
 	/* Evictions & activations on the inactive file list */
@@ -588,7 +630,9 @@ struct zone {
 	unsigned int		compact_considered;
 	/* 用于保存最大推迟次数，当次管理区的内存压缩成功后被置0，不会大于COMPACT_MAX_DEFER_SHIFT */
 	unsigned int		compact_defer_shift;
-	/* 置为内存压缩失败时的order值+1 */
+	/* 置为内存压缩失败时的order值+1，无论是否压缩成功，压缩结束后，此值都会为压缩时最大order值+1 
+	 * 而在内存压缩推迟过程中，此值会设置为推迟时内存压缩使用的order值
+	 */
 	int			compact_order_failed;
 #endif
 
@@ -608,17 +652,28 @@ struct zone {
 enum zone_flags {
 	ZONE_RECLAIM_LOCKED,		/* prevents concurrent reclaim */
 	ZONE_OOM_LOCKED,		/* zone is in OOM killer zonelist */
-	/* 表示zone含有过多的脏页 */
+	/* 表示zone有许多脏页阻塞在设备回写的地方(设备非常繁忙)，此标志会影响等待设备的进程是否加入到设备的等待队列中
+	 * 具体见wait_iff_congested()
+	 * 此标志会在kswapd中当zone达到平衡后清除
+	 */
 	ZONE_CONGESTED,			/* zone has many dirty pages backed by
 					 * a congested BDI
 					 */
+	/* 回收扫描最近找到了很多脏页放到了lru链表尾部 
+	 * 此标志会在kswapd中当zone达到平衡后清除
+	 */
 	ZONE_DIRTY,			/* reclaim scanning has recently found
 					 * many dirty file pages at the tail
 					 * of the LRU.
 					 */
+	/* 回收扫描发现zone许多页在回写，但是这些页并不一定是回收导致的回写 
+	 * 当进行内存回收时，所有隔离出来的页都正在回写(PG_writeback置位)，那么说明磁盘很忙，此zone很多页要进行回写，则置位此值
+	 * 此标志会在kswapd对此zone进行内存回收后清除
+	 */
 	ZONE_WRITEBACK,			/* reclaim scanning has recently found
 					 * many pages under writeback
 					 */
+	/* 可用于其他zone的页框数量已经用尽 */
 	ZONE_FAIR_DEPLETED,		/* fair zone policy batch depleted */
 };
 
@@ -845,6 +900,7 @@ typedef struct pglist_data {
 	 * 这个等待队列就专门用于kswapd的休眠和唤醒功能
 	 */
 	wait_queue_head_t kswapd_wait;
+	/* 当内存不足时，会将进程挂到这个等待队列中，当swap回收内存后，会唤醒这里面的进程 */
 	wait_queue_head_t pfmemalloc_wait;
 	/* 指针指向kswapd内核线程的进程描述符 */
 	struct task_struct *kswapd;	/* Protected by
@@ -937,6 +993,7 @@ unsigned long __init node_memmap_size_bytes(int, unsigned long, unsigned long);
  */
 #define zone_idx(zone)		((zone) - (zone)->zone_pgdat->node_zones)
 
+/* 此zone是否管理着页框，如果管理着页框，返回true，否则返回false */
 static inline int populated_zone(struct zone *zone)
 {
 	return (!!zone->present_pages);
@@ -1033,10 +1090,11 @@ extern struct zone *next_zone(struct zone *zone);
  * The user only needs to declare the zone variable, for_each_zone
  * fills it in.
  */
+/* 遍历所有node的所有zone */
 #define for_each_zone(zone)			        \
-	for (zone = (first_online_pgdat())->node_zones; \
+	for (zone = (first_online_pgdat())->node_zones; \	/* 获取第一个node的第一个zone */
 	     zone;					\
-	     zone = next_zone(zone))
+	     zone = next_zone(zone))						/* 下一个zone，如果为此node的最后一个zone，则是下个node的第一个zone */
 
 #define for_each_populated_zone(zone)		        \
 	for (zone = (first_online_pgdat())->node_zones; \

@@ -85,7 +85,9 @@ static inline int radix_tree_is_indirect_ptr(void *ptr)
 #define RADIX_TREE_COUNT_MASK	((1UL << RADIX_TREE_COUNT_SHIFT) - 1)
 
 struct radix_tree_node {
+	/* 此结点的高度，如果为1，说明是叶子结点，那么slots指向的是struct page */
 	unsigned int	path;	/* Offset in parent & height from the bottom */
+	/* 非叶子结点含有一个count域，表示该结点的孩子的数量 */
 	unsigned int	count;
 	union {
 		struct {
@@ -99,14 +101,22 @@ struct radix_tree_node {
 	};
 	/* For tree user */
 	struct list_head private_list;
+	/* 结点的slot指针，内核根用户配置将树的slot数定义为4或6，即每个radix_node结点有16或64个slot，RADIX_TREE_MAP_SIZE代表slot数量，当树高为1时，64个slot对应64个页，当树高为2时，对应64 * 64个页
+	 * 简单来说，slots要么指向一个radix_tree_node(是本结点的子结点)，要么指向一个struct page
+	 */
 	void __rcu	*slots[RADIX_TREE_MAP_SIZE];
+	/* slot标签数组，一个二维数组，每个slot用2位标识，RADIX_TREE_MAX_TAGS为3
+	 * 用于记录对应的slot下面的子树有没有相应的标志位，比如tags[0]置位代表子树有PAGE_CACHE_DIRTY，
+	 */
 	unsigned long	tags[RADIX_TREE_MAX_TAGS][RADIX_TREE_TAG_LONGS];
 };
 
 /* root tags are stored in gfp_mask, shifted by __GFP_BITS_SHIFT */
 struct radix_tree_root {
+	/* 整个基树的高度 */
 	unsigned int		height;
 	gfp_t			gfp_mask;
+	/* 指向基树的root结点 */
 	struct radix_tree_node	__rcu *rnode;
 };
 

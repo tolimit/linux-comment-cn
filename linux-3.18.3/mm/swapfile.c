@@ -47,6 +47,7 @@ static sector_t map_swap_entry(swp_entry_t, struct block_device**);
 
 DEFINE_SPINLOCK(swap_lock);
 static unsigned int nr_swapfiles;
+/* swap页槽总数 */
 atomic_long_t nr_swap_pages;
 /* protected with swap_lock. reading in vm_swap_full() doesn't need lock */
 long total_swap_pages;
@@ -507,6 +508,7 @@ static unsigned long scan_swap_map(struct swap_info_struct *si,
 	scan_base = offset = si->cluster_next;
 
 	/* SSD algorithm */
+	/* SSD使用 */
 	if (si->cluster_info) {
 		scan_swap_map_try_ssd_cluster(si, &offset, &scan_base);
 		goto checks;
@@ -552,6 +554,7 @@ static unsigned long scan_swap_map(struct swap_info_struct *si,
 	}
 
 checks:
+	/* SSD使用 */
 	if (si->cluster_info) {
 		while (scan_swap_map_ssd_cluster_conflict(si, offset))
 			scan_swap_map_try_ssd_cluster(si, &offset, &scan_base);
@@ -636,24 +639,38 @@ no_page:
 	return 0;
 }
 
+/* 获取一个swap页槽，返回一个页表项，这个页表项会覆盖映射了此页的页表项 */
 swp_entry_t get_swap_page(void)
 {
 	struct swap_info_struct *si, *next;
 	pgoff_t offset;
 
+	/* 如果swap页槽总数小于等于0，则说明swap分区已满 */
 	if (atomic_long_read(&nr_swap_pages) <= 0)
 		goto noswap;
+	/* swap页槽总数 - 1 */
 	atomic_long_dec(&nr_swap_pages);
 
+	/* 对可用swap_avail_lock链表上锁，此链表中是可用的swap分区 */
 	spin_lock(&swap_avail_lock);
 
 start_over:
+	/* 遍历swap_avail_head链表，里面链入了所有swap分区描述符，它们按照优先级排列
+	 * 获取到的swap分区描述符保存在si指针里 
+	 * 获取到的swap分区的下一个swap分区保存在next中
+	 */
 	plist_for_each_entry_safe(si, next, &swap_avail_head, avail_list) {
 		/* requeue si to after same-priority siblings */
+		/* 获取到一个swap分区，将其在swap_avail_head中的位置移到同优先级的swap分区的最后面 */
 		plist_requeue(&si->avail_list, &swap_avail_head);
+		/* 解锁swap_avail_lock链表 */
 		spin_unlock(&swap_avail_lock);
+		/* 对此swap分区上锁 */
 		spin_lock(&si->lock);
+		
+		/* 如果此swap分区，最后的空闲页槽为0，或者此swap不能写 */
 		if (!si->highest_bit || !(si->flags & SWP_WRITEOK)) {
+			/* 解锁swap_avail_lock链表 */
 			spin_lock(&swap_avail_lock);
 			if (plist_node_empty(&si->avail_list)) {
 				spin_unlock(&si->lock);
@@ -665,14 +682,19 @@ start_over:
 			WARN(!(si->flags & SWP_WRITEOK),
 			     "swap_info %d in list but !SWP_WRITEOK\n",
 			     si->type);
+			/* 将此swap分区从swap_avail_head中删除 */
 			plist_del(&si->avail_list, &swap_avail_head);
+			/* 释放此swap分区的锁 */
 			spin_unlock(&si->lock);
+			/* 继续遍历，选择下一个swap分区 */
 			goto nextsi;
 		}
 
 		/* This is called for allocating swap entry for cache */
+		/* 此swap分区有空闲的页槽，获取一个，得到相对于第一个页槽的偏移量 */
 		offset = scan_swap_map(si, SWAP_HAS_CACHE);
 		spin_unlock(&si->lock);
+		/* 获取到了一个空闲页槽的偏移量，以此偏移量生成一个页表项 */
 		if (offset)
 			return swp_entry(si->type, offset);
 		pr_debug("scan_swap_map of si %d failed to find offset\n",
@@ -689,6 +711,7 @@ nextsi:
 		 * list may have been modified; so if next is still in the
 		 * swap_avail_head list then try it, otherwise start over.
 		 */
+		/* 如果没有下一个swap分区了，重新遍历一次swap_avail_head链表 */
 		if (plist_node_empty(&next->avail_list))
 			goto start_over;
 	}
@@ -697,6 +720,7 @@ nextsi:
 
 	atomic_long_inc(&nr_swap_pages);
 noswap:
+	/* 返回一个空的页表项 */
 	return (swp_entry_t) {0};
 }
 
@@ -2588,6 +2612,9 @@ void si_swapinfo(struct sysinfo *val)
  * - swap-cache reference is requested but there is already one. -> EEXIST
  * - swap-cache reference is requested but the entry is not used. -> ENOENT
  * - swap-mapped reference requested but needs continued swap count. -> ENOMEM
+ */
+/* 检查entry是否有效
+ * 并且增加entry对应页槽在swap_info_struct的swap_map的数值，此数值标记此页槽的页有多少个进程引用
  */
 static int __swap_duplicate(swp_entry_t entry, unsigned char usage)
 {

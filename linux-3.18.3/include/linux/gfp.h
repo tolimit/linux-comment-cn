@@ -86,11 +86,13 @@ struct vm_area_struct;
 #define __GFP_NOFAIL	((__force gfp_t)___GFP_NOFAIL)	/* See above */
 /* 一次分配失败后不再重试 */
 #define __GFP_NORETRY	((__force gfp_t)___GFP_NORETRY) /* See above */
+/* 允许使用保留的内存 */
 #define __GFP_MEMALLOC	((__force gfp_t)___GFP_MEMALLOC)/* Allow access to emergency reserves */
 /* 属于扩展页的页框 */
 #define __GFP_COMP	((__force gfp_t)___GFP_COMP)	/* Add compound page metadata */
 /* 任何返回的页框必须被填满0 */
 #define __GFP_ZERO	((__force gfp_t)___GFP_ZERO)	/* Return zeroed page on success */
+/* 不允许使用保留的内存，与__GFP_MEMALLOC互斥，如果两个都设置了，这个的优先级高 */
 #define __GFP_NOMEMALLOC ((__force gfp_t)___GFP_NOMEMALLOC) /* Don't use emergency reserves.
 							 * This takes precedence over the
 							 * __GFP_MEMALLOC flag if both are

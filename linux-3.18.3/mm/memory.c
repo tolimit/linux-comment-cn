@@ -2472,8 +2472,11 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		goto out;
 
 	entry = pte_to_swp_entry(orig_pte);
+	/* 这个entry不是swap类型的entry，但是此页表项是swap类型的页表项 */
 	if (unlikely(non_swap_entry(entry))) {
+		/* 是页面迁移类型的entry */
 		if (is_migration_entry(entry)) {
+			/* 进入处理 */
 			migration_entry_wait(mm, pmd, address);
 		} else if (is_hwpoison_entry(entry)) {
 			ret = VM_FAULT_HWPOISON;
@@ -2658,7 +2661,6 @@ static inline int check_stack_guard_page(struct vm_area_struct *vma, unsigned lo
 			return prev->vm_flags & VM_GROWSDOWN ? 0 : -ENOMEM;
 
 		/* 这里是prev的结束地址小于address的处理情况 */
-
 		return expand_downwards(vma, address - PAGE_SIZE);
 	}
 	/* vma是向上增长，并且address是vma的结束地址 */
@@ -2698,6 +2700,7 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	/* Check if we need to add a guard page to the stack */
 	/* 如果vma是向下增长的，并且address等于vma的起始地址，那么将vma起始地址处向下扩大一个页用于保护页 
 	 * 同样，如果vma是向上增长的，address等于vma的结束地址，页将vma在结束地址处向上扩大一个页用于保护页
+	 * 如果address超出了vma的地址区间，会根据vma是向上增长还是向下增长的情况重新配置vma的vm_start和vm_pgoff
 	 */
 	if (check_stack_guard_page(vma, address) < 0)
 		return VM_FAULT_SIGBUS;
@@ -2727,7 +2730,9 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
  	 */
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
-	/* 从高端内存区的伙伴系统中获取一个页，这个页会清0 */
+	/* 从高端内存区的伙伴系统中获取一个页，这个页会清0
+	 * 分配成功后此页的page->_count = 1
+	 */
 	page = alloc_zeroed_user_highpage_movable(vma, address);
 	/* 分配不成功 */
 	if (!page)
@@ -2770,7 +2775,9 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	page_add_new_anon_rmap(page, vma, address);
 	/* 更新memcg中的统计 */
 	mem_cgroup_commit_charge(page, memcg, false);
-	/* 通过判断，将页加入到活动lru缓存或者不能换出页的lru链表 */
+	/* 通过判断，将页加入到活动lru缓存或者不能换出页的lru链表
+	 * 当加入到活动lru缓存时，page->_count++
+	 */
 	lru_cache_add_active_or_unevictable(page, vma);
 setpte:
 	/* 将上面配置好的页表项写入页表 */
@@ -3132,20 +3139,26 @@ static int do_shared_fault(struct mm_struct *mm, struct vm_area_struct *vma,
  * The mmap_sem may have been released depending on flags and our
  * return value.  See filemap_fault() and __lock_page_or_retry().
  */
+/* 文件页线性映射的缺页异常处理函数 */
 static int do_linear_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned long address, pte_t *page_table, pmd_t *pmd,
 		unsigned int flags, pte_t orig_pte)
 {
+
+	/* address对应在vma所在进程地址空间的虚拟页框号 */
 	pgoff_t pgoff = (((address & PAGE_MASK)
 			- vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
 
 	pte_unmap(page_table);
 	if (!(flags & FAULT_FLAG_WRITE))
+		/* 对文件没有可写权限时的处理 */
 		return do_read_fault(mm, vma, address, pmd, pgoff, flags,
 				orig_pte);
 	if (!(vma->vm_flags & VM_SHARED))
+		/* 此线性区不可共享，进行写时复制的处理 */
 		return do_cow_fault(mm, vma, address, pmd, pgoff, flags,
 				orig_pte);
+	/* 此线性区可共享，并且可以读写 */
 	return do_shared_fault(mm, vma, address, pmd, pgoff, flags, orig_pte);
 }
 
@@ -3320,7 +3333,7 @@ static int handle_pte_fault(struct mm_struct *mm,
 		if (pte_none(entry)) {
 			if (vma->vm_ops) {
 				if (likely(vma->vm_ops->fault))
-					/* 如果vm_ops字段和fault字段都不为空，则说明这是一个基于文件的映射 */
+					/* 如果vm_ops字段和fault字段都不为空，则说明这是一个基于文件的映射，这里是线性映射的处理 */
 					return do_linear_fault(mm, vma, address,
 						pte, pmd, flags, entry);
 			}
@@ -3330,9 +3343,10 @@ static int handle_pte_fault(struct mm_struct *mm,
 		}
 		/* 通过页表项判断是否是文件页，是的话进行处理 */
 		if (pte_file(entry))
+			/* 文件页非线性映射的处理 */
 			return do_nonlinear_fault(mm, vma, address,
 					pte, pmd, flags, entry);
-		/* 如果页表项entry表明不是磁盘文件，则是匿名映射的页被换出 */
+		/* 如果页表项entry表明不是文件页，则是匿名映射的页被换出 */
 		return do_swap_page(mm, vma, address,
 					pte, pmd, flags, entry);
 	}

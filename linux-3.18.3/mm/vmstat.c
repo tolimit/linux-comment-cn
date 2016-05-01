@@ -572,11 +572,14 @@ void drain_zonestat(struct zone *zone, struct per_cpu_pageset *pset)
  * zone is the local node. This is useful for daemons who allocate
  * memory on behalf of other processes.
  */
+/* 主要是numa相关的计数 */
 void zone_statistics(struct zone *preferred_zone, struct zone *z, gfp_t flags)
 {
+	/* 分配到的页框所在的zone与期望的zone在同一个node */
 	if (z->zone_pgdat == preferred_zone->zone_pgdat) {
 		__inc_zone_state(z, NUMA_HIT);
 	} else {
+		/* 不在同一个node的情况 */
 		__inc_zone_state(z, NUMA_MISS);
 		__inc_zone_state(preferred_zone, NUMA_FOREIGN);
 	}

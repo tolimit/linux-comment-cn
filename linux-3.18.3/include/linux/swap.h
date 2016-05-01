@@ -85,19 +85,31 @@ static inline int current_is_kswapd(void)
  * For 2.5 we'll probably want to move the magic to just beyond the
  * bootbits...
  */
+/* swap交换区信息，保存在swap分区或swap文件的第一个页中，所以大小为一个页的大小 
+ * 还有一个struct swap_extent结构，描述一个swap分区中的一个子区
+ */
 union swap_header {
 	struct {
 		char reserved[PAGE_SIZE - 10];
+		/* swap空间的名字，SWAP-SPACE 或者 SWAPSPACE2 
+		 * 保存在第一个页槽的尾部
+		 */
 		char magic[10];			/* SWAP-SPACE or SWAPSPACE2 */
 	} magic;
 	struct {
+		/* 处于分区中的第一个1024字节，保存分区数据、磁盘标签等 */
 		char		bootbits[1024];	/* Space for disklabel etc. */
+		/* 交换算法版本 */
 		__u32		version;
+		/* 可有效使用的最后一个页槽 */
 		__u32		last_page;
+		/* 有问题的页槽个数 */
 		__u32		nr_badpages;
 		unsigned char	sws_uuid[16];
 		unsigned char	sws_volume[16];
+		/* 填充字节 */
 		__u32		padding[117];
+		/* 一共637个数字，用来指定有缺陷的页槽的位置 */
 		__u32		badpages[1];
 	} info;
 };
@@ -133,10 +145,15 @@ struct zone;
  *
  * We always assume that blocks are of size PAGE_SIZE.
  */
+/* 描述一个交换子区 */
 struct swap_extent {
 	struct list_head list;
+	/* 本子区开始页糟号，是相对于swap分区中第一个页槽的索引 */
 	pgoff_t start_page;
+	/* 页槽数量 */
 	pgoff_t nr_pages;
+
+	/* 在磁盘上对应的磁盘扇区号 */
 	sector_t start_block;
 };
 
@@ -211,33 +228,53 @@ struct percpu_cluster {
 /*
  * The in-memory structure used to track swap areas.
  */
+/* swap交换区描述符 
+ * 所有swap分区对应的address_space都保存在swapper_spaces数组中
+ */
 struct swap_info_struct {
+	/* 交换器标志 */
 	unsigned long	flags;		/* SWP_USED etc: see above */
+	/* 交换区优先级，在多个交换区时有用 */
 	signed short	prio;		/* swap priority of this type */
+	/* 用于加入swap_active_head链表 */
 	struct plist_node list;		/* entry in swap_active_head */
+	/* 用于加入到swap_avail_head链表 */
 	struct plist_node avail_list;	/* entry in swap_avail_head */
 	signed char	type;		/* strange name for an index */
+	/* 已经使用的页槽的数量(包括坏了的页槽，第一个保存swap信息的页槽，用于交换的页槽) */
 	unsigned int	max;		/* extent of the swap_map */
+	/* 指向一个数组，此数组长度与页槽数量相同，每个项表示映射了换出页的进程数量 */
 	unsigned char *swap_map;	/* vmalloc'ed array of usage counts */
 	struct swap_cluster_info *cluster_info; /* cluster info. Only for SSD */
 	struct swap_cluster_info free_cluster_head; /* free cluster list head */
 	struct swap_cluster_info free_cluster_tail; /* free cluster list tail */
+	/* 第一个空闲页槽的索引，小于此值是没有空闲页槽的 */
 	unsigned int lowest_bit;	/* index of first free in swap_map */
+	/* 最后一个空闲页槽的索引，扫描到此页槽结束 */
 	unsigned int highest_bit;	/* index of last free in swap_map */
+	/* 可用页槽总数 */
 	unsigned int pages;		/* total of usable pages of swap */
+	/* 已用页槽总数 */
 	unsigned int inuse_pages;	/* number of those currently in use */
+	/* 在搜索一个空闲页槽时，要扫描的下一个页槽 */
 	unsigned int cluster_next;	/* likely index for next allocation */
+	/* 从头开始扫描之前空闲页槽的分配次数 */
 	unsigned int cluster_nr;	/* countdown to next cluster search */
 	struct percpu_cluster __percpu *percpu_cluster; /* per cpu's swap location */
+	/* 指向最近使用的此swap分区中的子区 */
 	struct swap_extent *curr_swap_extent;
 	struct swap_extent first_swap_extent;
+	/* 存放此交换区的块设备描述符 */
 	struct block_device *bdev;	/* swap device or bdev of swap file */
+	/* 指向存放交换区的普通文件或者设备文件的文件对象 */
 	struct file *swap_file;		/* seldom referenced */
+	/* 存放交换区的磁盘分区自然块的大小 */
 	unsigned int old_block_size;	/* seldom referenced */
 #ifdef CONFIG_FRONTSWAP
 	unsigned long *frontswap_map;	/* frontswap in-use, one bit per page */
 	atomic_t frontswap_pages;	/* frontswap pages in-use counter */
 #endif
+	/* 交换区的锁 */
 	spinlock_t lock;		/*
 					 * protect map scan related fields like
 					 * swap_map, lowest_bit, highest_bit,
@@ -346,6 +383,12 @@ extern int sysctl_min_unmapped_ratio;
 extern int sysctl_min_slab_ratio;
 extern int zone_reclaim(struct zone *, gfp_t, unsigned int);
 #else
+/*
+ * 与/proc/sys/vm/zone_reclaim_mode文件相关联
+ * 0x1 使能内存回收机制
+ * 0x2 允许将脏页回写到磁盘
+ * 0x4 允许将匿名页回写到swap分区
+ */
 #define zone_reclaim_mode 0
 static inline int zone_reclaim(struct zone *z, gfp_t mask, unsigned int order)
 {
@@ -420,6 +463,7 @@ static inline bool vm_swap_full(void)
 	return atomic_long_read(&nr_swap_pages) * 2 < total_swap_pages;
 }
 
+/* 空闲的swap页数量 */
 static inline long get_nr_swap_pages(void)
 {
 	return atomic_long_read(&nr_swap_pages);

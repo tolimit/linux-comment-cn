@@ -71,6 +71,7 @@
  * SPARSEMEM section (for variants of SPARSEMEM that require section ids like
  * SPARSEMEM_EXTREME with !SPARSEMEM_VMEMMAP).
  */
+/* 页的标志 */
 enum pageflags {
 	PG_locked,		/* 页被锁定，例如，在磁盘IO操作中涉及的页 */
 	PG_error, 		/* 在传输页时发生IO错误 */
@@ -92,13 +93,13 @@ enum pageflags {
 #else
 	PG_compound,		/* 通过扩展分页机制(PAE)处理页框 */
 #endif
-	PG_swapcache,		/* 页属于对换高速缓存 */
+	PG_swapcache,		/* 此匿名页属于swapcache中，正在被换出 */
 	PG_mappedtodisk,	/* 页框中的所有数据对应于磁盘上分配的块 */
 	PG_reclaim,		/* 为回收内存，已经对页做了写入磁盘的标记 */
-	PG_swapbacked,		/* Page is backed by RAM/swap */
-	PG_unevictable,		/* Page is "unevictable"  */
+	PG_swapbacked,		/* 此页依靠swap，可能是进程的匿名页(堆、栈、数据段)，匿名mmap共享内存映射，shmem共享内存映射 */
+	PG_unevictable,		/* 此页不能被换出  */
 #ifdef CONFIG_MMU
-	PG_mlocked,		/* Page is vma mlocked */
+	PG_mlocked,		/* 此页被mlock锁在内存中 */
 #endif
 #ifdef CONFIG_ARCH_USES_PG_UNCACHED
 	PG_uncached,		/* Page has been mapped as uncached */

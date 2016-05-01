@@ -2032,6 +2032,15 @@ extern void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, 
 #define PF_SUPERPRIV	0x00000100	/* used super-user privileges */
 #define PF_DUMPCORE	0x00000200	/* dumped core */
 #define PF_SIGNALED	0x00000400	/* killed by a signal */
+/*
+ * 当前进程有很多可以释放的内存，如果能分配一点紧急内存给当前进程，那么当前进程可以返回更多的内存给系统。
+ * 非内存管理子系统不应该使用这个标记，除非这次分配保证会释放更大的内存给系统。
+ * 如果每个子系统都滥用这个标记，可能会耗尽内存管理子系统的保留内存。
+ * 当进程进行页面分配时，可以忽略内存管理的水印进行分配，这是告诉内存管理系统，给我一点紧急内存使用，我将会释放更多的内存给你。
+ * 如果忽略水印分配仍然失败，那么直接返回ENOMEM，而不是等待kswapd回收或者缩减内存
+ * 如果忽略水印分配仍然失败，那么直接返回ENOMEM，而不会调用OOM killer去杀死进程，释放内存
+ * 在page_allocs中失败并不会重试
+ */
 #define PF_MEMALLOC	0x00000800	/* Allocating memory */
 #define PF_NPROC_EXCEEDED 0x00001000	/* set_user noticed that RLIMIT_NPROC was exceeded */
 #define PF_USED_MATH	0x00002000	/* if unset the fpu must be initialized before use */
@@ -2042,6 +2051,7 @@ extern void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, 
 #define PF_KSWAPD	0x00040000	/* I am kswapd */
 #define PF_MEMALLOC_NOIO 0x00080000	/* Allocating memory without IO involved */
 #define PF_LESS_THROTTLE 0x00100000	/* Throttle me less: I clean memory */
+/* 是内核线程 */
 #define PF_KTHREAD	0x00200000	/* I am a kernel thread */
 /* 随机化虚拟地址空间 */
 #define PF_RANDOMIZE	0x00400000	/* randomize virtual address space */
@@ -2080,6 +2090,7 @@ extern void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, 
 /* __GFP_IO isn't allowed if PF_MEMALLOC_NOIO is set in current->flags
  * __GFP_FS is also cleared as it implies __GFP_IO.
  */
+/* 当前进程标志了PF_MEMALLOC_NOIO标志，则返回清除了__GFP_IO和__GFP_FS的flags */
 static inline gfp_t memalloc_noio_flags(gfp_t flags)
 {
 	if (unlikely(current->flags & PF_MEMALLOC_NOIO))

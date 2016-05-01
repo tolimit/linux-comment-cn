@@ -3731,9 +3731,9 @@ static int mem_cgroup_resize_memsw_limit(struct mem_cgroup *memcg,
 	return ret;
 }
 
-/* 返回zone回收的页框数量 
+/* 对zone进行软回收，也就是对memory中的使用内存超过了soft_limit_in_bytes的进程进行内存回收，只回收在此zone中的页框
+ * 返回zone回收的页框数量 
  * soft_limit与cgroup中的memory.soft_limit_in_bytes有关，其意义是申请内存时不限制，但是内存不足时优先从超过了soft_limit限制的进程回收页框
- *
  */
 unsigned long mem_cgroup_soft_limit_reclaim(struct zone *zone, int order,
 					    gfp_t gfp_mask,
@@ -3751,6 +3751,7 @@ unsigned long mem_cgroup_soft_limit_reclaim(struct zone *zone, int order,
 		return 0;
 
 	/* return &soft_limit_tree.rb_tree_per_node[nid]->rb_tree_per_zone[zid]; */
+	/* soft_limit_in_bytes为每个node的每个zone组织一个红黑树，这个红黑树中存放的是从此zone中分配了内存的memcg的组 */
 	mctz = soft_limit_tree_node_zone(zone_to_nid(zone), zone_idx(zone));
 	/*
 	 * This loop can run a while, specially if mem_cgroup's continuously
@@ -3758,17 +3759,21 @@ unsigned long mem_cgroup_soft_limit_reclaim(struct zone *zone, int order,
 	 * pressure
 	 */
 	do {
+		/* 第一次循环为空 */
 		if (next_mz)
 			mz = next_mz;
 		else
+			/* 第一次循环会执行这里，mz会指向mctz红黑树中最大memcg组 */
 			mz = mem_cgroup_largest_soft_limit_node(mctz);
 		if (!mz)
 			break;
-
+		/* 每次循环初始化扫描页框数量为0 */
 		nr_scanned = 0;
 		reclaimed = mem_cgroup_soft_reclaim(mz->memcg, zone,
 						    gfp_mask, &nr_scanned);
+		/* 总回收页框数量 */
 		nr_reclaimed += reclaimed;
+		/* 总扫描页框数量 */
 		*total_scanned += nr_scanned;
 		spin_lock_irq(&mctz->lock);
 

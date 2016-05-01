@@ -18,8 +18,10 @@ struct address_space;
  * PAGEVEC_SIZE默认为14
  */
 struct pagevec {
+	/* 当前数量 */
 	unsigned long nr;
 	unsigned long cold;
+	/* 指针数组，每一项都可以指向一个页描述符，默认大小是14 */
 	struct page *pages[PAGEVEC_SIZE];
 };
 
@@ -52,6 +54,7 @@ static inline unsigned pagevec_count(struct pagevec *pvec)
 	return pvec->nr;
 }
 
+/* 获取lru缓存pvec剩余的空间数量 */
 static inline unsigned pagevec_space(struct pagevec *pvec)
 {
 	return PAGEVEC_SIZE - pvec->nr;
@@ -60,9 +63,12 @@ static inline unsigned pagevec_space(struct pagevec *pvec)
 /*
  * Add a page to a pagevec.  Returns the number of slots still available.
  */
+/* 将page加入到lru缓存pvec中 */
 static inline unsigned pagevec_add(struct pagevec *pvec, struct page *page)
 {
+	/* lru缓存pvec的pages[]中的pvec->nr项指针指向此页 */
 	pvec->pages[pvec->nr++] = page;
+	/* 返回此lru缓存剩余的空间 */
 	return pagevec_space(pvec);
 }
 

@@ -167,9 +167,9 @@ static void anon_vma_chain_link(struct vm_area_struct *vma,
  * This must be called with the mmap_sem held for reading.
  */
 /* 为vma准备反向映射条件 
- * 如果vma没有anon_vma则新建一个，并且同时新建一个anon_vma_chain
- * 检查此vma能与前后的vma进行合并吗，如果可以，则使用能够合并的那个vma的anon_vma，如果不能够合并，则申请一个空闲的vma
- * 将avc->anon_vma指向获得的vma，avc->vma指向vma，并把avc加入到vma的anon_vma_chain中
+ * 检查此vma能与前后的vma进行合并吗，如果可以，则使用能够合并的那个vma的anon_vma，如果不能够合并，则申请一个空闲的anon_vma
+ * 创建一个新的anon_vma_chain
+ * 将avc->anon_vma指向获得的vma(此vma可能是新建的，也可能是可以合并的vma的anon_vma)，avc->vma指向vma，并把avc加入到vma的anon_vma_chain中
  */
 int anon_vma_prepare(struct vm_area_struct *vma)
 {
@@ -190,10 +190,7 @@ int anon_vma_prepare(struct vm_area_struct *vma)
 		if (!avc)
 			goto out_enomem;
 
-		/* 检查vma能否与其前后的vma进行合并，如果可以，则返回能够合并的那个vma的anon_vma
-		 * 先检查能否与其后的vma合并，再检查能否与前面的vma合并
-		 */
-		/* 检查vma能否与其前/后vma进行合并，如果可以，则返回能够合并的那个vma的anon_vma 
+		/* 检查vma能否与其前/后vma进行合并，如果可以，则返回能够合并的那个vma的anon_vma，如果不可以，返回NULL
 		 * 主要检查vma前后的vma是否连在一起(vma->vm_end == 前/后vma->vm_start)
 		 * vma->vm_policy和前/后vma->vm_policy
 		 * 是否都为文件映射，除了(VM_READ|VM_WRITE|VM_EXEC|VM_SOFTDIRTY)其他标志位是否相同，如果为文件映射，前/后vma映射的文件位置是否正好等于vma映射的文件 + vma的长度
@@ -491,6 +488,7 @@ void __init anon_vma_init(void)
  * that the anon_vma pointer from page->mapping is valid if there is a
  * mapcount, we can dereference the anon_vma after observing those.
  */
+/* 获取匿名页所指向的anon_vma，如果是文件页，则返回NULL */
 struct anon_vma *page_get_anon_vma(struct page *page)
 {
 	struct anon_vma *anon_vma = NULL;
@@ -612,10 +610,14 @@ void page_unlock_anon_vma_read(struct anon_vma *anon_vma)
 static inline unsigned long
 __vma_address(struct page *page, struct vm_area_struct *vma)
 {
-	/* 获取此页在vma中的偏移量(以页为单位) 
-	 * 如果是匿名线性区，page->index中保存的是此页映射到了匿名线性区中的第几页
+	/* 获取此页在vma所属进程地址空间的线性地址
+	 * 如果是匿名线性区，page->index中保存的是此页映射到了匿名线性区中的虚拟页框号
 	 */
 	pgoff_t pgoff = page_to_pgoff(page);
+	/* vma->vm_pgoff保存vma起始地址所在的虚拟页框号 
+	 * pgoff保存的是page在此vma的进程地址空间的虚拟页框号
+	 * vma->vm_start保存的是vma的起始地址
+	 */
 	return vma->vm_start + ((pgoff - vma->vm_pgoff) << PAGE_SHIFT);
 }
 
@@ -712,25 +714,35 @@ pte_t *__page_check_address(struct page *page, struct mm_struct *mm,
 		goto check;
 	}
 
+	/* 根据address，获取address对应的页中间目录项 */
 	pmd = mm_find_pmd(mm, address);
 	if (!pmd)
 		return NULL;
 
+	/* 根据页中间目录项pmd，获取address对应的页表项 */
 	pte = pte_offset_map(pmd, address);
 	/* Make a quick check before getting the lock */
+	/* 如果页表项pte映射的页不在内存中 */
 	if (!sync && !pte_present(*pte)) {
+		/* 那么就取消此页表项到page的映射 */
 		pte_unmap(pte);
 		return NULL;
 	}
 
+	/* 获取锁(并不是上锁，而是指向锁的指针)，此锁可能是mm->page_table_lock也可能在pmd对应页描述符的ptl */
 	ptl = pte_lockptr(mm, pmd);
 check:
+	/* 上锁 */
 	spin_lock(ptl);
+	/* 此页表项pte映射的就是此page */
 	if (pte_present(*pte) && page_to_pfn(page) == pte_pfn(*pte)) {
 		*ptlp = ptl;
+		/* 返回页表项 */
 		return pte;
 	}
+	/* 页表项pte映射的不是此页，释放锁 */
 	pte_unmap_unlock(pte, ptl);
+	/* 此mm没有映射此page，返回NULL */
 	return NULL;
 }
 
@@ -769,6 +781,10 @@ struct page_referenced_arg {
 /*
  * arg: page_referenced_arg will be passed
  */
+/* 对page进行反向映射时，获取到一个vma，会通过此函数对page和vma进行处理 
+ * address是目标page在此vma的线性地址，如果此page没有映射到此vma中，那么通过此线性地址找到的页表项也不会映射到目标page上
+ * 相反，如果page映射到了此vma中，那么address找到的页表项就一定是映射了目标page的
+ */
 static int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 			unsigned long address, void *arg)
 {
@@ -777,6 +793,7 @@ static int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 	int referenced = 0;
 	struct page_referenced_arg *pra = arg;
 
+	/* 透明大页的情况 */
 	if (unlikely(PageTransHuge(page))) {
 		pmd_t *pmd;
 
@@ -784,6 +801,7 @@ static int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 		 * rmap might return false positives; we must filter
 		 * these out using page_check_address_pmd().
 		 */
+		/* 检查此线性地址在mm中对应的页中间目录项是否映射的是page，如果是，返回此页中间目录项，否则返回NULL */
 		pmd = page_check_address_pmd(page, mm, address,
 					     PAGE_CHECK_ADDRESS_PMD_FLAG, &ptl);
 		if (!pmd)
@@ -800,22 +818,33 @@ static int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 			referenced++;
 		spin_unlock(ptl);
 	} else {
+		/* 4K页的情况 */
+
 		pte_t *pte;
 
 		/*
 		 * rmap might return false positives; we must filter
 		 * these out using page_check_address().
 		 */
+		/* 检查此线性地址address在mm中对应的页表项是否映射的是page，如果是，返回此页表项，否则返回NULL
+		 * 会对ptl上锁
+		 */
 		pte = page_check_address(page, mm, address, &ptl, 0);
+		/* pte为空，说明此vma没有映射此page，返回SWAP_AGAIN，SWAP_AGAIN会继续遍历其他vma */
 		if (!pte)
 			return SWAP_AGAIN;
 
+		/* 此vma映射了此页 */
+
+		/* 如果此vma中的页禁止被换出 */
 		if (vma->vm_flags & VM_LOCKED) {
 			pte_unmap_unlock(pte, ptl);
 			pra->vm_flags |= VM_LOCKED;
+			/* 返回SWAP_FAIL */
 			return SWAP_FAIL; /* To break the loop */
 		}
 
+		/* 清除页表项pte中的Accessed标志，如果通知链mm->mmu_notifier_mm有挂等待此通知的项目，则执行(一般没有) */
 		if (ptep_clear_flush_young_notify(vma, address, pte)) {
 			/*
 			 * Don't treat a reference through a sequentially read
@@ -824,18 +853,25 @@ static int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 			 * mapping is already gone, the unmap path will have
 			 * set PG_referenced or activated the page.
 			 */
+			/* 此页被vma所属进程最近访问过，referenced++ */
 			if (likely(!(vma->vm_flags & VM_SEQ_READ)))
 				referenced++;
 		}
+		/* 释放锁 */
 		pte_unmap_unlock(pte, ptl);
 	}
 
+	/* 此vma映射了此page，并且此页被此vma所属进程最近访问过 */
 	if (referenced) {
+		/* 增加映射的vma的访问计数器 */
 		pra->referenced++;
+		/* 在所有映射了此页的vma标志中增加此vma的标志 */
 		pra->vm_flags |= vma->vm_flags;
 	}
 
+	/* pra->mapcount初始化时是page->_mapcount，就是引用了此页的页表项数量 */
 	pra->mapcount--;
+	/* 当pra->mapcount为0时，说明遍历完了 */
 	if (!pra->mapcount)
 		return SWAP_SUCCESS; /* To break the loop */
 
@@ -865,8 +901,9 @@ static bool invalid_page_referenced_vma(struct vm_area_struct *vma, void *arg)
  */
 /* 检查此page最近是否有被访问
  * PRFA扫描一页调用一次此函数，如果此页的PG_referenced标志或者引用此页的页表项的Accessed置位，则表明此函数最近有被访问，返回1，否则返回0
- * 并且此函数没扫描一页都会将此页的PG_referenced标志和引用此页的页表项的Accessed清0，相当于从新开始直到下次page_referenced()扫描到此页时判断此页最近是否被访问
+ * 并且此函数每扫描一页都会将引用此页的页表项的Accessed清0，相当于从新开始直到下次page_referenced()扫描到此页时判断此页最近是否被访问
  * 此函数会涉及到通过反向映射找到引用此页的页表
+ * 返回此页最近被多少个进程访问过
  */
 int page_referenced(struct page *page,
 		    int is_locked,
@@ -877,10 +914,15 @@ int page_referenced(struct page *page,
 	int we_locked = 0;
 	/* 进行page_referenced处理时需要使用的参数 */
 	struct page_referenced_arg pra = {
+		/*
+		 * 注意此结构中有一个referenced，初始为0，此项用于记录此page被多少个进程访问过的计数器
+		 */
+
+		/* 保存page->_mapcount，引用了此页表项的数量，在扫描过程中，当扫描到一个引用了此page的vma时，此值会-- */
 		.mapcount = page_mapcount(page),
 		.memcg = memcg,
 	};
-	/* 反向映射扫描函数 */
+	/* 反向映射扫描控制结构 */
 	struct rmap_walk_control rwc = {
 		/* 设置反向映射时获得每一个线性区vma后的处理函数 */
 		.rmap_one = page_referenced_one,
@@ -903,7 +945,7 @@ int page_referenced(struct page *page,
 
 	/* 如果此页不是匿名页，并且用于KSM(内存合并)，并且没有上锁，则将其上锁(设置PG_locked) */
 	if (!is_locked && (!PageAnon(page) || PageKsm(page))) {
-		/* 设置page的PG_locked标志 */
+		/* 设置page的PG_locked标志，对此页上锁 */
 		we_locked = trylock_page(page);
 		if (!we_locked)
 			return 1;
@@ -923,9 +965,11 @@ int page_referenced(struct page *page,
 	ret = rmap_walk(page, &rwc);
 	*vm_flags = pra.vm_flags;
 
+	/* 释放此页的锁 */
 	if (we_locked)
 		unlock_page(page);
 
+	/* 返回有多少个进程最近访问了此页 */
 	return pra.referenced;
 }
 
@@ -945,10 +989,15 @@ static int page_mkclean_one(struct page *page, struct vm_area_struct *vma,
 	if (pte_dirty(*pte) || pte_write(*pte)) {
 		pte_t entry;
 
+		/* 将pte对应页在cache中的缓存全部回写 */
 		flush_cache_page(vma, address, pte_pfn(*pte));
+		/* 获取pte指针对应的页表项内容，保存到entry中，然后将pte指针对应的页表项清空 */
 		entry = ptep_clear_flush(vma, address, pte);
+		/* 清除entry中的_PAGE_RW标志 */
 		entry = pte_wrprotect(entry);
+		/* 清除entry中的_PAGE_DIRTY标志 */
 		entry = pte_mkclean(entry);
+		/* 将entry回写到pte指针对应的页表项中 */
 		set_pte_at(mm, address, pte, entry);
 		ret = 1;
 	}
@@ -1028,6 +1077,10 @@ void page_move_anon_rmap(struct page *page,
  * @exclusive:	the page is exclusively owned by the current process
  */
 /* 对一个页建立反向映射 */
+/*
+ * page: 建立反向映射的匿名页的页描述符
+ * vma: 目标匿名线性区
+ */
 static void __page_set_anon_rmap(struct page *page,
 	struct vm_area_struct *vma, unsigned long address, int exclusive)
 {
@@ -1146,14 +1199,15 @@ void do_page_add_anon_rmap(struct page *page,
 /* 对一个新页进行反向映射
  * page: 目标页
  * vma: 访问此页的vma
- * address: 线性地址
+ * address: 目标线性地址
  */
 void page_add_new_anon_rmap(struct page *page,
 	struct vm_area_struct *vma, unsigned long address)
 {
 	/* 地址必须处于vma中 */
 	VM_BUG_ON_VMA(address < vma->vm_start || address >= vma->vm_end, vma);
-	
+
+	/* 设置此页为匿名页 */
 	SetPageSwapBacked(page);
 	/* 设置此页的_mapcount = 0，说明此页正在使用，但是是非共享的(>0是共享) */
 	atomic_set(&page->_mapcount, 0); /* increment count (starts at -1) */
@@ -1167,7 +1221,7 @@ void page_add_new_anon_rmap(struct page *page,
 	/* 进行反向映射
 	 * 设置page->mapping最低位为1
 	 * page->mapping指向此vma->anon_vma
-	 * page->index存放此page在vma中的第几页
+	 * page->index存放此page的虚拟页框号
 	 */
 	__page_set_anon_rmap(page, vma, address, 1);
 }
@@ -1192,6 +1246,9 @@ void page_add_file_rmap(struct page *page)
 	mem_cgroup_end_page_stat(memcg, locked, flags);
 }
 
+/* 主要对此页进行page->_mapcount-- 
+ * 如果page->_mapcount--后为0，那还需要对zone的NR_FILE_MAPPED和memcg的MEM_CGROUP_STAT_FILE_MAPPED进行--
+ */
 static void page_remove_file_rmap(struct page *page)
 {
 	struct mem_cgroup *memcg;
@@ -1201,6 +1258,7 @@ static void page_remove_file_rmap(struct page *page)
 	memcg = mem_cgroup_begin_page_stat(page, &locked, &flags);
 
 	/* page still mapped by someone else? */
+	/* 对此页进行page->_mapcount--，如果--后结果为负则返回真 */
 	if (!atomic_add_negative(-1, &page->_mapcount))
 		goto out;
 
@@ -1228,18 +1286,27 @@ out:
  *
  * The caller needs to hold the pte lock.
  */
+/* 主要对此页的页描述符的_mapcount进行--操作 */
 void page_remove_rmap(struct page *page)
 {
+	/* 如果是文件页 */
 	if (!PageAnon(page)) {
+		/* 主要对此页进行page->_mapcount-- 
+ 		 * 如果page->_mapcount--后为0，那还需要对zone的NR_FILE_MAPPED和memcg的MEM_CGROUP_STAT_FILE_MAPPED进行--
+ 		 */
 		page_remove_file_rmap(page);
 		return;
 	}
 
+	/* 这里处理的是匿名页 */
+
 	/* page still mapped by someone else? */
+	/* 对此页进行page->_mapcount--，如果--后结果为负则返回真，结果为负说明此页没有页表映射了 */
 	if (!atomic_add_negative(-1, &page->_mapcount))
 		return;
 
 	/* Hugepages are not counted in NR_ANON_PAGES for now. */
+	/* 大页不处理 */
 	if (unlikely(PageHuge(page)))
 		return;
 
@@ -1248,13 +1315,16 @@ void page_remove_rmap(struct page *page)
 	 * these counters are not modified in interrupt context, and
 	 * pte lock(a spinlock) is held, which implies preemption disabled.
 	 */
+	/* 透明大页，更新统计 */
 	if (PageTransHuge(page))
 		__dec_zone_page_state(page, NR_ANON_TRANSPARENT_HUGEPAGES);
 
 	__mod_zone_page_state(page_zone(page), NR_ANON_PAGES,
 			      -hpage_nr_pages(page));
 
+	/* 此页标记了PG_mlocked，用于锁在内存中 */
 	if (unlikely(PageMlocked(page)))
+		/* 清除此标记，因为有些情况会强制对mlock中的内存进行unmap操作 */
 		clear_page_mlock(page);
 
 	/*
@@ -1271,6 +1341,12 @@ void page_remove_rmap(struct page *page)
 /*
  * @arg: enum ttu_flags will be passed to this argument
  */
+/*
+ * 对vma进行unmap操作，并对此页的page->_mapcount--，这里面的页可能是文件页也可能是匿名页
+ * page: 目标page
+ * vma: 获取到的vma
+ * address: page在vma所属的进程地址空间中的线性地址
+ */
 static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		     unsigned long address, void *arg)
 {
@@ -1281,7 +1357,14 @@ static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 	int ret = SWAP_AGAIN;
 	enum ttu_flags flags = (enum ttu_flags)arg;
 
+	/* 先检查此vma有没有映射此page，有则返回此page在此进程地址空间的页表项 */
+	/* 检查page有没有映射到mm这个地址空间中
+	 * address是page在此vma所属进程地址空间的线性地址，获取方法: address = vma->vm_pgoff + page->pgoff << PAGE_SHIFT;
+	 * 通过线性地址address获取对应在此进程地址空间的页表项，然后通过页表项映射的页框号和page的页框号比较，则知道页表项是否映射了此page
+	 * 会对页表上锁
+	 */
 	pte = page_check_address(page, mm, address, &ptl, 0);
+	/* pte为空，则说明page没有映射到此mm所属的进程地址空间，则跳到out */
 	if (!pte)
 		goto out;
 
@@ -1290,41 +1373,58 @@ static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 	 * If it's recently referenced (perhaps page_referenced
 	 * skipped over this mm) then we should reactivate it.
 	 */
+	/* 如果flags没有要求忽略mlock的vma */
 	if (!(flags & TTU_IGNORE_MLOCK)) {
+		/* 如果此vma要求里面的页都锁在内存中，则跳到out_mlock */
 		if (vma->vm_flags & VM_LOCKED)
 			goto out_mlock;
 
+		/* flags标记了对vma进行mlock释放模式，则跳到out_unmap，因为这个函数中只对vma进行unmap操作 */
 		if (flags & TTU_MUNLOCK)
 			goto out_unmap;
 	}
+	/* 忽略页表项中的Accessed */
 	if (!(flags & TTU_IGNORE_ACCESS)) {
+		/* 清除页表项的Accessed标志 */
 		if (ptep_clear_flush_young_notify(vma, address, pte)) {
+			/* 清除失败，发生在清除后检查是否为0 */
 			ret = SWAP_FAIL;
 			goto out_unmap;
 		}
   	}
 
 	/* Nuke the page table entry. */
+	/* 空函数 */
 	flush_cache_page(vma, address, page_to_pfn(page));
+	/* 获取页表项内容，保存到pteval中，然后清空页表项 */
 	pteval = ptep_clear_flush(vma, address, pte);
 
 	/* Move the dirty bit to the physical page now the pte is gone. */
+	/* 如果页表项标记了此页为脏页 */
 	if (pte_dirty(pteval))
+		/* 设置页描述符的PG_dirty标记 */
 		set_page_dirty(page);
 
 	/* Update high watermark before we lower rss */
+	/* 更新进程所拥有的最大页框数 */
 	update_hiwater_rss(mm);
 
+	/* 此页是被标记为"坏页"的页，这种页用于内核纠正一些错误，是否用于边界检查? */
 	if (PageHWPoison(page) && !(flags & TTU_IGNORE_HWPOISON)) {
+		/* 非大页 */
 		if (!PageHuge(page)) {
+			/* 是匿名页，则mm的MM_ANONPAGES-- */
 			if (PageAnon(page))
 				dec_mm_counter(mm, MM_ANONPAGES);
 			else
+				/* 此页是文件页，则mm的MM_FILEPAGES-- */
 				dec_mm_counter(mm, MM_FILEPAGES);
 		}
+		/* 设置页表项新的内容为 swp_entry_to_pte(make_hwpoison_entry(page)) */
 		set_pte_at(mm, address, pte,
 			   swp_entry_to_pte(make_hwpoison_entry(page)));
 	} else if (pte_unused(pteval)) {
+		/* 一些架构上会有这种情况，X86不会调用到这个判断中 */
 		/*
 		 * The guest indicated that the page content is of no
 		 * interest anymore. Simply discard the pte, vmscan
@@ -1335,26 +1435,42 @@ static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		else
 			dec_mm_counter(mm, MM_FILEPAGES);
 	} else if (PageAnon(page)) {
+		/* 此页为匿名页处理 */
+
+		/* 获取page->private中保存的内容，调用到try_to_unmap()前会把此页加入到swapcache，然后分配一个以swap页槽偏移量为内容的swp_entry_t */
 		swp_entry_t entry = { .val = page_private(page) };
 		pte_t swp_pte;
 
+		/* 对于内存回收，基本都是这种情况，因为page在调用到这里之前已经被移动到了swapcache 
+		 * 而对于内存压缩，
+		 */
 		if (PageSwapCache(page)) {
 			/*
 			 * Store the swap location in the pte.
 			 * See handle_pte_fault() ...
 			 */
+			/* 检查entry是否有效
+ 			 * 并且增加entry对应页槽在swap_info_struct的swap_map的数值，此数值标记此页槽的页有多少个进程引用
+ 			 */
 			if (swap_duplicate(entry) < 0) {
+				/* 检查失败，把原来的页表项内容写回去 */
 				set_pte_at(mm, address, pte, pteval);
+				/* 返回值为SWAP_FAIL */
 				ret = SWAP_FAIL;
 				goto out_unmap;
 			}
+			
+			/* entry有效，并且swap_map中目标页槽的数值也++了 */
+			/* 这个if的情况是此vma所属进程的mm没有加入到所有进程的mmlist中(init_mm.mmlist) */
 			if (list_empty(&mm->mmlist)) {
 				spin_lock(&mmlist_lock);
 				if (list_empty(&mm->mmlist))
 					list_add(&mm->mmlist, &init_mm.mmlist);
 				spin_unlock(&mmlist_lock);
 			}
+			/* 减少此mm的匿名页统计 */
 			dec_mm_counter(mm, MM_ANONPAGES);
+			/* 增加此mm的页表中标记了页在swap的页表项的数量 */
 			inc_mm_counter(mm, MM_SWAPENTS);
 		} else if (IS_ENABLED(CONFIG_MIGRATION)) {
 			/*
@@ -1362,24 +1478,46 @@ static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 			 * pte. do_swap_page() will wait until the migration
 			 * pte is removed and then restart fault handling.
 			 */
+			/* 执行到这里，就是对匿名页进行页面迁移工作(内存压缩时使用) */
+			
+			/* 如果flags没有标记此次是在执行页面迁移操作 */
 			BUG_ON(!(flags & TTU_MIGRATION));
+			/* 为此匿名页创建一个页迁移使用的swp_entry_t，此swp_entry_t指向此匿名页 */
 			entry = make_migration_entry(page, pte_write(pteval));
 		}
+		/*
+		 * 这个entry有两种情况，保存在page->private中的以在swap中页槽偏移量为数据的swp_entry_t
+		 * 另一种是一个迁移使用的swp_entry_t
+		 */
+		/* 将entry转为一个页表项 */
 		swp_pte = swp_entry_to_pte(entry);
+		/* 页表项有一位用于_PAGE_SOFT_DIRTY，用于kmemcheck */
 		if (pte_soft_dirty(pteval))
 			swp_pte = pte_swp_mksoft_dirty(swp_pte);
+		/* 将配置好的新的页表项swp_pte写入页表项中 */
 		set_pte_at(mm, address, pte, swp_pte);
+
+		/* 如果页表项表示映射的是一个文件，则是一个bug。因为这里处理的是匿名页，主要检查页表项中的_PAGE_FILE位 */
 		BUG_ON(pte_file(*pte));
 	} else if (IS_ENABLED(CONFIG_MIGRATION) &&
 		   (flags & TTU_MIGRATION)) {
+		/* 本次调用到此是对文件页进行页迁移操作的，会为映射了此文件页的进程创建一个swp_entry_t，这个swp_entry_t指向此文件页 */
 		/* Establish migration entry for a file page */
 		swp_entry_t entry;
+		
+		/* 建立一个迁移使用的swp_entry_t，用于文件页迁移 */
 		entry = make_migration_entry(page, pte_write(pteval));
+		/* 将此页表的pte页表项写入entry转为的页表项内容 */
 		set_pte_at(mm, address, pte, swp_entry_to_pte(entry));
 	} else
+		/* 此页是文件页，仅对此mm的文件页计数--，文件页不需要设置页表项，只需要对页表项进行清空 */
 		dec_mm_counter(mm, MM_FILEPAGES);
 
+	/* 如果是匿名页，上面的代码已经将匿名页对应于此进程的页表项进行修改了 */
+
+	/* 主要对此页的页描述符的_mapcount进行--操作，当_mapcount为-1时，表示此页已经没有页表项映射了 */
 	page_remove_rmap(page);
+	/* 每个进程对此页进行了unmap操作，此页的page->_count--，并判断是否为0，如果为0则释放此页，一般这里不会为0 */
 	page_cache_release(page);
 
 out_unmap:
@@ -1654,14 +1792,23 @@ static int page_not_mapped(struct page *page)
  * SWAP_FAIL	- the page is unswappable
  * SWAP_MLOCK	- page is mlocked.
  */
+/* 对映射了page的进程页表项进行unmap操作
+ * 在内存回收过程中，如果是匿名页，那么page->private中是一个带有swap页槽偏移量的swp_entry_t，此后这个swp_entry_t可以转为页表项
+ */
 int try_to_unmap(struct page *page, enum ttu_flags flags)
 {
 	int ret;
+	/* 反向映射控制结构 */
 	struct rmap_walk_control rwc = {
+		/* 对一个vma所属页表进行unmap操作
+		 * 每次获取一个vma就会对此vma调用一次此函数，在函数里第一件事就是判断获取的vma有没有映射此page
+		 */
 		.rmap_one = try_to_unmap_one,
 		.arg = (void *)flags,
+		/* 对一个vma进行unmap后会执行此函数 */
 		.done = page_not_mapped,
 		.file_nonlinear = try_to_unmap_nonlinear,
+		/* 用于对整个anon_vma的红黑树进行上锁，用读写信号量，锁是aon_vma的rwsem */
 		.anon_lock = page_lock_anon_vma_read,
 	};
 
@@ -1678,8 +1825,10 @@ int try_to_unmap(struct page *page, enum ttu_flags flags)
 	if ((flags & TTU_MIGRATION) && !PageKsm(page) && PageAnon(page))
 		rwc.invalid_vma = invalid_migration_vma;
 
+	/* 里面会对所有映射了此页的vma进行遍历，具体见反向映射 */
 	ret = rmap_walk(page, &rwc);
 
+	/* 没有vma要求此页锁在内存中，并且page->_mapcount为-1了，表示没有进程映射了此页 */
 	if (ret != SWAP_MLOCK && !page_mapped(page))
 		ret = SWAP_SUCCESS;
 	return ret;
@@ -1779,6 +1928,7 @@ static int rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc)
 	 */
 	pgoff_t pgoff = page_to_pgoff(page);
 	struct anon_vma_chain *avc;
+	/* 默认是SWAP_AGAIN，SWAP_AGAIN会继续遍历 */
 	int ret = SWAP_AGAIN;
 
 	/* 获取page对应的anon_vma，并且在里面会调用anon_lock，如果anon_lock为空，则直接对anon_vma上一次读锁 
@@ -1788,15 +1938,17 @@ static int rmap_walk_anon(struct page *page, struct rmap_walk_control *rwc)
 	if (!anon_vma)
 		return ret;
 
+	/* 获取page->mapping所指的anon_vma的红黑树中的各个节点，每个结点是一个avc，然后通过avc->vma获取vma */
 	anon_vma_interval_tree_foreach(avc, &anon_vma->rb_root, pgoff, pgoff) {
 		struct vm_area_struct *vma = avc->vma;
+		/* 获取此页在此vma中的线性地址 */
 		unsigned long address = vma_address(page, vma);
 
-		/* 判断是否是不需要处理的线性区 */
+		/* 判断是否是不需要处理的线性区，通过vma->vm_start + page->index * PAGE_SIZE */
 		if (rwc->invalid_vma && rwc->invalid_vma(vma, rwc->arg))
 			continue;
 
-		/* 处理获得的线性区 */
+		/* 判断page是否在获得的线性区中，并清空对应页表项的Accessed标志 */
 		ret = rwc->rmap_one(page, vma, address, rwc->arg);
 		if (ret != SWAP_AGAIN)
 			break;

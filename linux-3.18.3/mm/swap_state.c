@@ -38,6 +38,7 @@ static struct backing_dev_info swap_backing_dev_info = {
 	.capabilities	= BDI_CAP_NO_ACCT_AND_WRITEBACK | BDI_CAP_SWAP_BACKED,
 };
 
+/* 所有swap分区对应的address_space都在这里 */
 struct address_space swapper_spaces[MAX_SWAPFILES] = {
 	[0 ... MAX_SWAPFILES - 1] = {
 		.page_tree	= RADIX_TREE_INIT(GFP_ATOMIC|__GFP_NOWARN),
@@ -83,6 +84,12 @@ void show_swap_cache_info(void)
  * __add_to_swap_cache resembles add_to_page_cache_locked on swapper_space,
  * but sets SwapCache flag and private instead of mapping and index.
  */
+/* 将页page加入到swap_cache，然后这个页被视为文件页
+ * 设置页描述符的private = swap页槽偏移量
+ * 设置页的PG_swapcache标志，表明此页在swapcache中，正在被换出
+ * 将页描述符信息保存到以swap页槽偏移量为索引的结点
+ * 成功会对此page的_count++
+ */
 int __add_to_swap_cache(struct page *page, swp_entry_t entry)
 {
 	int error;
@@ -92,21 +99,30 @@ int __add_to_swap_cache(struct page *page, swp_entry_t entry)
 	VM_BUG_ON_PAGE(PageSwapCache(page), page);
 	VM_BUG_ON_PAGE(!PageSwapBacked(page), page);
 
+	/* 对page->_count++ */
 	page_cache_get(page);
+	/* 设置此页处于swapcache中 */
 	SetPageSwapCache(page);
+	/* 设置页描述符的private = swap页槽偏移量 */
 	set_page_private(page, entry.val);
 
+	/* 获取entry对应的swap分区对应的address_space */
 	address_space = swap_address_space(entry);
 	spin_lock_irq(&address_space->tree_lock);
+	/* 将页描述符信息保存到以页槽偏移量为索引的结点 */
 	error = radix_tree_insert(&address_space->page_tree,
 					entry.val, page);
+	/* 保存成功 */
 	if (likely(!error)) {
 		address_space->nrpages++;
+		/* 增加zone的NR_FILE_PAGES统计，这时候page加入到了swapcache中，被视为文件页了 */
 		__inc_zone_page_state(page, NR_FILE_PAGES);
+		/* 增加swap_cache_info.add_total */
 		INC_CACHE_INFO(add_total);
 	}
 	spin_unlock_irq(&address_space->tree_lock);
 
+	/* 发生错误 */
 	if (unlikely(error)) {
 		/*
 		 * Only the context which have set SWAP_HAS_CACHE flag
@@ -116,6 +132,7 @@ int __add_to_swap_cache(struct page *page, swp_entry_t entry)
 		VM_BUG_ON(error == -EEXIST);
 		set_page_private(page, 0UL);
 		ClearPageSwapCache(page);
+		/* 对page->_count--，并判断是否为0，如果为0则释放此页 */
 		page_cache_release(page);
 	}
 
@@ -127,9 +144,11 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp_mask)
 {
 	int error;
 
+	/* 会禁止抢占 */
 	error = radix_tree_maybe_preload(gfp_mask);
 	if (!error) {
 		error = __add_to_swap_cache(page, entry);
+		/* 重新开启抢占 */
 		radix_tree_preload_end();
 	}
 	return error;
@@ -139,6 +158,7 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp_mask)
  * This must be called only on pages that have
  * been verified to be in the swap cache.
  */
+/* 将page从swapcache中删除 */
 void __delete_from_swap_cache(struct page *page)
 {
 	swp_entry_t entry;
@@ -148,13 +168,21 @@ void __delete_from_swap_cache(struct page *page)
 	VM_BUG_ON_PAGE(!PageSwapCache(page), page);
 	VM_BUG_ON_PAGE(PageWriteback(page), page);
 
+	/* 获取页的swp_entry_t，保存在page->private中 */
 	entry.val = page_private(page);
+	/* 根据entry获取对应swap分区的address_space */
 	address_space = swap_address_space(entry);
+	/* 从address_space的基树中删除此页 */
 	radix_tree_delete(&address_space->page_tree, page_private(page));
+	/* 设置此页的private = 0 */
 	set_page_private(page, 0);
+	/* 清除此页的pageswapcache标志 */
 	ClearPageSwapCache(page);
+	/* swap分区的swapcache中页的数量-- */
 	address_space->nrpages--;
+	/* 减少zone的文件页数量 */
 	__dec_zone_page_state(page, NR_FILE_PAGES);
+	/* swap_cache_info.del_total-- */
 	INC_CACHE_INFO(del_total);
 }
 
@@ -165,6 +193,12 @@ void __delete_from_swap_cache(struct page *page)
  * Allocate swap space for the page and add the page to the
  * swap cache.  Caller needs to hold the page lock. 
  */
+/* 将页page加入到swap_cache，然后这个页被视为文件页
+ * 设置页描述符的private = swap页槽偏移量生成的页表项swp_entry_t
+ * 设置页的PG_swapcache标志，表明此页在swapcache中，正在被换出
+ * 将页描述符信息保存到以swap页槽偏移量为索引的结点
+ * 标记页page为脏页(PG_dirty)，后面就会被换出
+ */
 int add_to_swap(struct page *page, struct list_head *list)
 {
 	swp_entry_t entry;
@@ -173,10 +207,12 @@ int add_to_swap(struct page *page, struct list_head *list)
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
 	VM_BUG_ON_PAGE(!PageUptodate(page), page);
 
+	/* 获取一个swap页槽，返回一个页表项，这个页表项会覆盖映射了此页的页表项 */
 	entry = get_swap_page();
 	if (!entry.val)
 		return 0;
 
+	/* 如果是透明大页 */
 	if (unlikely(PageTransHuge(page)))
 		if (unlikely(split_huge_page_to_list(page, list))) {
 			swapcache_free(entry);
@@ -194,10 +230,16 @@ int add_to_swap(struct page *page, struct list_head *list)
 	/*
 	 * Add it to the swap cache and mark it dirty
 	 */
+	/* 将页page加入到swap_cache，然后这个页被视为文件页
+	 * 设置页描述符的private = swap页槽偏移量
+	 * 设置页的PG_swapcache标志，表明此页在swapcache中，正在被换出
+	 * 将页描述符信息保存到以swap页槽偏移量为索引的结点
+	 */
 	err = add_to_swap_cache(page, entry,
 			__GFP_HIGH|__GFP_NOMEMALLOC|__GFP_NOWARN);
 
 	if (!err) {	/* Success */
+		/* 成功，标记页page为脏页(PG_dirty)，后面就会被换出 */
 		SetPageDirty(page);
 		return 1;
 	} else {	/* -ENOMEM radix-tree allocation failure */

@@ -337,6 +337,7 @@ static inline int get_freepage_migratetype(struct page *page)
 static inline int put_page_testzero(struct page *page)
 {
 	VM_BUG_ON_PAGE(atomic_read(&page->_count) == 0, page);
+	/* 对page->_count--，并判断是否为0 */
 	return atomic_dec_and_test(&page->_count);
 }
 

@@ -418,7 +418,9 @@ static inline pgoff_t linear_page_index(struct vm_area_struct *vma,
 	pgoff_t pgoff;
 	if (unlikely(is_vm_hugetlb_page(vma)))
 		return linear_hugepage_index(vma, address);
+	/* 以页大小作为偏移量 */
 	pgoff = (address - vma->vm_start) >> PAGE_SHIFT;
+	/* page的线性地址对应的虚拟页框号，vma->vm_pgoff保存的是vma的开始线性地址对应的虚拟页框号 */
 	pgoff += vma->vm_pgoff;
 	return pgoff >> (PAGE_CACHE_SHIFT - PAGE_SHIFT);
 }

@@ -44,15 +44,18 @@ struct address_space;
 /* 页描述符，描述一个页框，也会用于描述一个SLAB，相当于同时是页描述符，也是SLAB描述符 */
 /* 页的分类:
  * 不可移动页: 在内存中有固定位置，不能移到到其他位置，内核使用的大多数内存属于这种类别的页
- * 可回收页: 不能直接移动，但可以删除，其内容可以从其他地方重新生成，如映射自文件的数据的页，kswapd守护线程会根据回收页访问的频繁程度，周期性释放这类页。在内存短缺时，也会发起页面回收
- * 可移动: 可以随意移动。用户空间应用程序的页属于此类别，它们是通过页表映射的，复制时更新进程的页表即可(这些页主要从高端内存区分配)
+ * 可回收页: 针对某个磁盘文件进行映射时使用的页
+ * 可移动: 没有针对某个磁盘文件进行映射时使用的页，一般为: 进程堆、进程栈、进程数据段、匿名mmap共享内存、shmem共享内存
  */
 struct page {
 	/* First double word block */
 	/* 用于页描述符，一组标志(如PG_locked、PG_error)，同时页框所在的管理区和node的编号也保存在当中 */
-	/* 在lru算法中主要用到两个标志
-	 * PG_active: 表示此页当前是否活跃，当放到active_lru链表时，被置位
+	/* 在lru算法中主要用到的标志
+	 * PG_active: 表示此页当前是否活跃，当放到或者准备放到活动lru链表时，被置位
 	 * PG_referenced: 表示此页最近是否被访问，每次页面访问都会被置位
+	 * PG_lru: 表示此页是处于lru链表中的
+	 * PG_mlocked: 表示此页被mlock()锁在内存中，禁止换出和释放
+	 * PG_swapbacked: 表示此页依靠swap，可能是进程的匿名页(堆、栈、数据段)，匿名mmap共享内存映射，shmem共享内存映射
 	 */
 	unsigned long flags;		/* Atomic flags, some possibly
 					 * updated asynchronously */
@@ -79,8 +82,8 @@ struct page {
 		union {
 			/* 作为不同的含义被几种内核成分使用。例如，它在页磁盘映像或匿名区中标识存放在页框中的数据的位置，或者它存放一个换出页标识符
 			 * 当此页作为映射页(文件映射)时，保存这块页的数据在整个文件数据中以页为大小的偏移量
-			 * 当此页作为匿名页时，保存此页在线性区vma内的页索引或者是页的线性地址/PAGE_SIZE。
-			 * 对于匿名页的page->index表示的是page在vma中的偏移。共享匿名页的产生应该只有在fork，clone等时候。
+			 * 当此页作为匿名页时，保存此页在线性区vma内的页索引或者是页的线性地址 >> PAGE_SIZE。
+			 * 对于匿名页的page->index表示的是page在vma中的虚拟页框号(此页的开始线性地址 >> PAGE_SIZE)。共享匿名页的产生应该只有在fork，clone完成并在写时复制前。
 			 */
 			pgoff_t index;		/* Our offset within mapping. */
 			/* 用于SLAB和SLUB描述符，指向空闲对象链表 */
@@ -148,9 +151,13 @@ struct page {
 					int units;	/* SLOB */
 				};
 				/* 页框的引用计数，如果为-1，则此页框空闲，并可分配给任一进程或内核；如果大于或等于0，则说明页框被分配给了一个或多个进程，或用于存放内核数据。page_count()返回_count加1的值，也就是该页的使用者数目 */
-				/* 当此页从伙伴系统拿出来时，_count默认被设置为1 */
-				/* 加入到lru链表的页这个引用计数会++，相反，从lru中拿出，_count会--
-				 * 此参数在内存回收的时候有很重要的意义
+				/* 当此页从伙伴系统拿出来时，_count被设置为1(这个1代表是此新页要立即要映射给的进程或者使用的内核模块)
+				 * 当每多一个进程映射此页时，此值会++，比如映射前此值为0，当有10个进程映射此页时，此值为10
+				 * 当此页加入到lru缓存时，这个引用计数会++，从lru缓存中加入到lru链表时，_count会--
+				 * 当一个页从lru链表中拿出来时，如果_count如果为0的话，则此页直接释放到伙伴系统中
+				 * 当此页加入到swapcache中时，此值会++，从swapcache中拿出来时，会--
+				 * 当此页有buffer_head时，此值会++，当此页的buffer_head被移除时，此值会--
+				 * 此参数在内存回收的时候有很重要的意义，只有此值为0的页，才会被回收
 				 */
 				atomic_t _count;		/* Usage count, see below. */
 			};
@@ -162,7 +169,12 @@ struct page {
 
 	/* Third double word block */
 	union {
-		/* 包含到页的最近最少使用(LRU)双向链表的指针，用于插入伙伴系统的空闲链表中，只有块中头页框要被插入。也用于SLAB，加入到kmem_cache中的SLAB链表中，在做内存压缩时也用于加入到需要移动的页的链表中 */
+		/* 页处于不同情况时，加入的链表不同
+		 * 1.是一个进程正在使用的页，加入到对应lru链表
+		 * 2.如果为空闲页框，并且是空闲块的第一个页，加入到伙伴系统的空闲块链表中(只有空闲块的第一个页需要加入)
+		 * 3.如果是一个slab的第一个页，则将其加入到slab链表中(比如slab的满slab链表，slub的部分空slab链表)
+		 * 4.将页隔离时用于加入隔离链表
+		 */
 		struct list_head lru;	/* Pageout list, eg. active_list
 					 * protected by zone->lru_lock !
 					 * Can be used as a generic list
@@ -197,7 +209,10 @@ struct page {
 
 	/* Remainder is not double word aligned */
 	union {
-		/* 可用于正在使用页的内核成分(例如: 在缓冲页的情况下它是一个缓冲器头指针，如果页是空闲的，则该字段由伙伴系统使用，在给伙伴系统使用时，表明的是块的2的次方数，只有块的第一个页框会使用) */
+		/* 可用于正在使用页的内核成分(例如: 在缓冲页的情况下它是一个缓冲器头指针，如果页是空闲的，则该字段由伙伴系统使用，在给伙伴系统使用时，表明的是块的2的次方数，只有块的第一个页框会使用) 
+		 * 当此页是个匿名页，并被交换到swap中时，用于保存此页在swap的swp_entry_t
+		 * 当此页是文件页时，保存此页映射的文件数据在磁盘中的块的头结点(struct buffer_head)并且页的标志中会有PAGE_FLAGS_PRIVATE，因为这个页映射的4k数据有可能分散在磁盘多个块上
+		 */
 		unsigned long private;		
 #if USE_SPLIT_PTE_PTLOCKS
 #if ALLOC_SPLIT_PTLOCKS
@@ -336,12 +351,19 @@ struct vm_area_struct {
 	 * linkage into the address_space->i_mmap interval tree, or
 	 * linkage of vma in the address_space->i_mmap_nonlinear list.
 	 */
-	/* 链接到反向映射所使用的数据结构，主要用于映射页的反向映射 */
+	/* 链接到反向映射所使用的数据结构，主要用于映射页的反向映射，分线性映射和非线性映射 */
 	union {
+		/* 线性映射时使用 */
 		struct {
+			/* 加入到struct address_space中的i_mmap红黑树，实现文件页的反向映射 */
 			struct rb_node rb;
 			unsigned long rb_subtree_last;
 		} linear;
+		/* 非线性映射时使用的链表
+		 * 非线性映射与线性映射的区别:  
+		 * 线性映射，如果vma大小为8K，那映射的内容是文件的连续8K内容，比如0~8K的数据
+		 * 非线性映射，如果vma大小为8k，那映射的内容是文件的两个页，这两个页是随机的，比如0~4K,12~16K
+		 */
 		struct list_head nonlinear;
 	} shared;
 
@@ -362,11 +384,15 @@ struct vm_area_struct {
 	struct anon_vma *anon_vma;	/* Serialized by page_table_lock */
 
 	/* Function pointers to deal with this struct. */
-	/* 指向线性区操作的方法 */
+	/* 指向线性区操作的方法，对于匿名线性区，一般为空，对于文件映射区，根据文件系统而定，默认是generic_file_vm_ops 
+	 * 如果是shmem共享内存，则是shmem_vm_ops
+	 */
 	const struct vm_operations_struct *vm_ops;
 
 	/* Information about our backing store: */
-	/* 在映射文件中的偏移量。对匿名页，它等于0或者vm_start/PAGE_SIZE */
+	/* 如果是映射文件，保存开始地址在映射文件中的偏移量(以页大小为单位)。对匿名页，它等于0或者此vma->vm_start地址对应的页号(此页号非物理页框号，可以理解为虚拟页框号)
+	 * 如果此vma是匿名线性区vma，此值为vm_start >> PAGE_SIZE，它保存的是vm_start所在的虚拟页框号
+	 */
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
 					   units, *not* PAGE_CACHE_SIZE */
 	/* 指向映射文件的文件对象，也可能指向建立shmem共享内存中返回的struct file，如果是匿名映射区，此值为NULL或者一个匿名文件(这里跟swap有关，待看) */
@@ -394,9 +420,9 @@ struct core_state {
 };
 
 enum {
-	MM_FILEPAGES,
-	MM_ANONPAGES, 	/* 匿名内存映射 */
-	MM_SWAPENTS,
+	MM_FILEPAGES,	/* 一个进程的mm_struct中文件页数量 */
+	MM_ANONPAGES, 	/* 一个进程的mm_struct中匿名页数量 */
+	MM_SWAPENTS,	/* 一个进程的mm_struct中页表中标记了页在swap的页表项的数量 */
 	NR_MM_COUNTERS
 };
 
@@ -450,7 +476,7 @@ struct mm_struct {
 	
 	/* 线性区的自旋锁和页表的自旋锁 */
 	spinlock_t page_table_lock;		/* Protects page tables and some counters */
-	/* 线性区的读写信号量，当需要对某个线性区进行操作时，会获取 */
+	/* 线性区的读写信号量，当需要对某个线性区vma进行操作时，会获取 */
 	struct rw_semaphore mmap_sem;
 
 	/* 用于链入内核中所有mm_struct的双向链表中 */

@@ -1383,7 +1383,7 @@ retry_reserve:
 	/* 直接从migratetype类型的链表中获取了2的order次方个页框 */
 	page = __rmqueue_smallest(zone, order, migratetype);
 
-	/* 如果page为空，没有在需要的migratetype类型中分配获得页框，说明当前需求类型(migratetype)的页框没有空闲，会根据fallback数组中定义好的优先级从其他类型的页框中获取页框 */
+	/* 如果page为空，没有在需要的migratetype类型中分配获得页框，说明当前需求类型(migratetype)的页框没有空闲，会根据fallback数组中定义好的优先级从其他类型的页框中获取页框，一次移动一个pageblock */
 	if (unlikely(!page) && migratetype != MIGRATE_RESERVE) {
 		/* 根据fallbacks数组从其他migratetype类型的链表中获取内存 */
 		page = __rmqueue_fallback(zone, order, migratetype);
@@ -1707,7 +1707,7 @@ int __isolate_free_page(struct page *page, unsigned int order)
 	/* 如果此pageblock的类型不是isolate */
 	if (!is_migrate_isolate(mt)) {
 		/* Obey watermarks as if the page was being allocated */
-		/* 当前阀值 = zone的低阀值 + 2^order */
+		/* 当前阀值 = zone的低阀值 + 1^order */
 		watermark = low_wmark_pages(zone) + (1 << order);
 		/* 检查zone的空闲内存数量，这里我们设置了watermark，zone的最低空闲内存不能少于这个数，少于则直接返回 */
 		if (!zone_watermark_ok(zone, 0, watermark, 0, 0))
@@ -1834,18 +1834,22 @@ again:
 		spin_unlock(&zone->lock);
 		if (!page)
 			goto failed;
-		/* 统计，减少zone的free_pages数量统计，因为里面使用加法，所以这里传进负数 */
+		/* 统计，减少zone的此页所属pageblock类型的free_pages数量统计，因为里面使用加法，所以这里传进负数 */
 		__mod_zone_freepage_state(zone, -(1 << order),
 					  get_freepage_migratetype(page));
 	}
 
+	/* 如果原本并不是期望从此zone分配内存，但是现在从此zone分配到内存了，那么就对此zone的NR_ALLOC_BATCH计数减掉本次分配的页框 
+	 * 这个NR_ALLOC_BATCH表示的是允许这样分配的页框数量，而不是已经进行这样分配的页框数量
+	 */
 	__mod_zone_page_state(zone, NR_ALLOC_BATCH, -(1 << order));
+	/* 如果此zone的NR_ALLOC_BATCH小于0了，则标记ZONE_FAIR_DEPLETED */
 	if (atomic_long_read(&zone->vm_stat[NR_ALLOC_BATCH]) <= 0 &&
 	    !test_bit(ZONE_FAIR_DEPLETED, &zone->flags))
 		set_bit(ZONE_FAIR_DEPLETED, &zone->flags);
 
 	__count_zone_vm_events(PGALLOC, zone, 1 << order);
-	/* 统计 */
+	/* 主要是numa相关的计数 */
 	zone_statistics(preferred_zone, zone, gfp_flags);
 	local_irq_restore(flags);
 
@@ -1943,27 +1947,48 @@ static inline bool should_fail_alloc_page(gfp_t gfp_mask, unsigned int order)
  * Return true if free pages are above 'mark'. This takes into account the order
  * of the allocation.
  */
-/* 如果free_pages超过mark，则返回true */
+/* 如果 分配后剩余的页框数量 大于 降低后的mask加上此zone保留的内存数量，则返回真，否则返回假
+ * z: 目标zone
+ * order: 需要分配的页框数量的order值
+ * mark: zone对应的阀值的值(min或者low或者high)
+ * classzone_idx: 管理区的类型的偏移量，0是 ZONE_DMA , 1是 ZONE_NORMAL , 2是 ZONE_HIGHMEM , 3是 ZONE_MOVABLE
+ * alloc_flags: 分配标志
+ * free_pages: zone的空闲页框数量
+ */
 static bool __zone_watermark_ok(struct zone *z, unsigned int order,
 			unsigned long mark, int classzone_idx, int alloc_flags,
 			long free_pages)
 {
 	/* free_pages my go negative - that's OK */
+	/* zone的某个阀值，这里算是目标阀值 */
 	long min = mark;
 	int o;
 	long free_cma = 0;
 
+	/* zone空闲页框数量 - 需要分配的页框数量 - 1 后剩余的空闲页框数量 */
 	free_pages -= (1 << order) - 1;
+	/* 如果有ALLOC_HIGH，那么目标阀值就等于原来阀值的一半 */
 	if (alloc_flags & ALLOC_HIGH)
 		min -= min / 2;
+	/* 如果有ALLOC_HARDER，那么目标阀值就等于原来阀值的1/4 
+	 * 这里要注意，如果是GFP_ATOMIC标志，那么会有(ALLOC_HIGH | ALLOC_HARDER)
+	 * 也就是GFP_ATOMIC标志，会让目标阀值降为原来阀值的1/8
+	 */
 	if (alloc_flags & ALLOC_HARDER)
 		min -= min / 4;
 #ifdef CONFIG_CMA
 	/* If allocation can't use CMA areas don't use free CMA pages */
+	/* 如果没有ALLOC_CMA标志，则获取此zone空闲的cma数量 */
 	if (!(alloc_flags & ALLOC_CMA))
 		free_cma = zone_page_state(z, NR_FREE_CMA_PAGES);
 #endif
 
+	/* free_pages - free_cma是如果现在把1^order的页框数量分配后，剩余的空闲页框(如果不使用cma，还要把空闲cma数量减掉) 
+	 * 分配后剩余的页框数量 小于等于 降低后的阀值加上此zone保留的内存数量
+	 * 那么就返回false
+	 * 如果 分配后剩余的页框数量 大于 降低后的阀值加上此zone保留的内存数量
+	 * 就继续往下
+	 */
 	if (free_pages - free_cma <= min + z->lowmem_reserve[classzone_idx])
 		return false;
 	for (o = 0; o < order; o++) {
@@ -1979,7 +2004,10 @@ static bool __zone_watermark_ok(struct zone *z, unsigned int order,
 	return true;
 }
 
-/* 用于计算管理区中空闲页框个数的阀值，返回真说明可用空间足够，否则，说明没有剩下多少空闲空间 */
+/* 分配后剩余的页框数量是否大于阀值加上此zone保留的内存数量 
+ * 大于算通过，小于等于算失败
+ * 如果有ALLOC_HIGH和ALLOC_HARDER，那么可能会对阀值降低
+ */
 bool zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 		      int classzone_idx, int alloc_flags)
 {
@@ -2116,6 +2144,7 @@ static void zlc_clear_zones_full(struct zonelist *zonelist)
 	bitmap_zero(zlc->fullzones, MAX_ZONES_PER_ZONELIST);
 }
 
+/* local_zone和zone是否属于同一个node */
 static bool zone_local(struct zone *local_zone, struct zone *zone)
 {
 	return local_zone->node == zone->node;
@@ -2160,11 +2189,15 @@ static bool zone_allows_reclaim(struct zone *local_zone, struct zone *zone)
 
 #endif	/* CONFIG_NUMA */
 
+/* 重新设置除目标zone之外，node中在此zone前面的zone的batch页数量大小 */
 static void reset_alloc_batches(struct zone *preferred_zone)
 {
+	/* 指向node的第一个zone */
 	struct zone *zone = preferred_zone->zone_pgdat->node_zones;
 
+	
 	do {
+		/* batch页数量 = high阀值 - 低阀值 - 当前batch数量 */
 		mod_zone_page_state(zone, NR_ALLOC_BATCH,
 			high_wmark_pages(zone) - low_wmark_pages(zone) -
 			atomic_long_read(&zone->vm_stat[NR_ALLOC_BATCH]));
@@ -2176,7 +2209,11 @@ static void reset_alloc_batches(struct zone *preferred_zone)
  * get_page_from_freelist goes through the zonelist trying to allocate
  * a page.
  */
-/* 从管理区链表中遍历所有管理区，获取指定连续的页框数 */
+/* 从管理区链表中遍历所有管理区，获取指定连续的页框数 
+ * 在遍历管理区时，如果此zone当前空闲内存减去需要申请的内存之后，空闲内存是低于low阀值，那么此zone会进行快速内存回收
+ * 第一轮循环会尝试只从preferred_zone这个zone中获取连续页框，如果无法获取，会进入第二轮循环
+ * 第二轮循环会遍历整个zonelist中的zone，从里面获取连续页框
+ */
 static struct page *
 get_page_from_freelist(gfp_t gfp_mask, nodemask_t *nodemask, unsigned int order,
 		struct zonelist *zonelist, int high_zoneidx, int alloc_flags,
@@ -2188,6 +2225,7 @@ get_page_from_freelist(gfp_t gfp_mask, nodemask_t *nodemask, unsigned int order,
 	nodemask_t *allowednodes = NULL;/* zonelist_cache approximation */
 	int zlc_active = 0;		/* set if using zonelist_cache */
 	int did_zlc_setup = 0;		/* just call zlc_setup() one time */
+	/* 是否考虑脏页过多的判断值，如果脏页过多，则不在此zone进行分配 */
 	bool consider_zone_dirty = (alloc_flags & ALLOC_WMARK_LOW) &&
 				(gfp_mask & __GFP_WRITE);
 	int nr_fair_skipped = 0;
@@ -2222,10 +2260,15 @@ zonelist_scan:
 		 * page was allocated in should have no effect on the
 		 * time the page has in memory before being reclaimed.
 		 */
-		/* 公平分配，这里我还不太清楚，有没有大神帮忙说明一下 */
+		/* 公平分配，标记了ALLOC_FAIR的情况，会只从preferred_zone这个zone所在node
+		 * 所以第一轮循环，会只尝试从preferred_zone所在node进行分配
+		 * 而第二轮循环，会遍历整个zonelist里的包含的其他node的zone
+		 */
 		if (alloc_flags & ALLOC_FAIR) {
+			/* 判断zone和preferred_zone是否属于同一个node，不属于则跳出循环，因为后面的页不会属于此node了 */
 			if (!zone_local(preferred_zone, zone))
 				break;
+			/* 此zone属于此node，看看ZONE_FAIR_DEPLETED标记有没有置位，置位了说明此zone可用于其他zone的页框数量已经用尽 */
 			if (test_bit(ZONE_FAIR_DEPLETED, &zone->flags)) {
 				nr_fair_skipped++;
 				continue;
@@ -2257,14 +2300,23 @@ zonelist_scan:
 		 * will require awareness of zones in the
 		 * dirty-throttling and the flusher threads.
 		 */
-		/* 如果需要考虑到zone的脏页数量的情况，如果此zone在内存中有过多的脏页，则跳过此zone */
+		/* 如果gfp_mask中允许进行脏页回写，那么如果此zone在内存中有过多的脏页，则跳过此zone，不对此zone进行处理
+		 * 这里大概意思是脏页过多，kswapd会将这些脏页进行回写，这里就不将这些脏页进行回写了，会增加整个zone的压力
+		 */
 		if (consider_zone_dirty && !zone_dirty_ok(zone))
 			continue;
 
 		/* 选择阀值，阀值保存在管理区的watermark中，分别有alloc_min alloc_low alloc_high三种，选择任何一种都会要求分配后空闲页框数量不能少于阀值，默认是alloc_low */
 		mark = zone->watermark[alloc_flags & ALLOC_WMARK_MASK];
 		
-		/* 根据阀值查看管理区中是否有足够的空闲页框，空闲内存数量保存在 zone->vm_stat[NR_FREE_PAGES]，这里的检查算法是: 当前空闲内存减去需要申请的内存之后，空闲内存是否高于阀值，高于则允许分配 */
+		/* 根据阀值查看管理区中是否有足够的空闲页框，空闲内存数量保存在 zone->vm_stat[NR_FREE_PAGES]，这里的检查算法是: 分配后剩余的页框数量是否大于阀值加上此zone保留的内存数量，高于则返回true
+		 * 三个阀值的大小关系是min < low < high
+		 * high一般用于判断zone是否平衡
+		 * 快速分配时，用的阀值是low
+		 * 慢速分配中，用的阀值是min
+		 * 在准备oom进程时，用的阀值是high
+		 * 分配后剩余的页框数量低于或等于阀值加上此zone保留的内存数量，那么进行快速内存回收
+		 */
 		if (!zone_watermark_ok(zone, order, mark,
 				       classzone_idx, alloc_flags)) {
 			/* 没有足够的空闲页框 */
@@ -2289,6 +2341,11 @@ zonelist_scan:
 				did_zlc_setup = 1;
 			}
 
+			/* 
+			 * 判断是否对此zone进行内存回收，如果开启了内存回收，则会对此zone进行内存回收，否则，通过距离判断是否进行内存回收
+			 * zone_allows_reclaim()函数实际上就是判断zone所在node是否与preferred_zone所在node的距离 < RECLAIM_DISTANCE(30或10)
+			 * 当内存回收未开启的情况下，只会对距离比较近的zone进行回收
+			 */
 			if (zone_reclaim_mode == 0 ||
 			    !zone_allows_reclaim(preferred_zone, zone))
 				goto this_zone_full;
@@ -2301,18 +2358,23 @@ zonelist_scan:
 				!zlc_zone_worth_trying(zonelist, z, allowednodes))
 				continue;
 
-			/* 尝试回收zone区的一些可回收页(文件映射使用的页)和一些slab，这里面也挺复杂的，以后的文章分析 */
+			/*
+			 * 这里就叫做快速回收，因为这里会选择尽量快的回收方式
+			 * 回收到了2^order数量的页框时，才会返回真，即使回收了，没达到这个数量，也返回假
+			 */
 			ret = zone_reclaim(zone, gfp_mask, order);
 			switch (ret) {
 			case ZONE_RECLAIM_NOSCAN:  	/* 没有进行回收 */
 				/* did not scan */
 				continue;
-			case ZONE_RECLAIM_FULL: 		/* 没有找到可回收的页面 */
+			case ZONE_RECLAIM_FULL: 		/* 没有找到可回收的页面，也就是回收到的页框数量为0 */
 				/* scanned but unreclaimable */
 				continue;
 			default:
+				/* 回收到了一些或者回收到了2^order个页框，都会执行到这 */
+				
 				/* did we reclaim enough */
-				/* 回收到了一些页，这里继续检查阀值是否足够分配连续页框，足够则跳到 try_this_zone 尝试分配 */
+				/* 回收到了一些页，这里继续检查阀值是否足够分配连续页框，足够则跳到 try_this_zone 尝试在此zone中分配 */
 				if (zone_watermark_ok(zone, order, mark,
 						classzone_idx, alloc_flags))
 					goto try_this_zone;
@@ -2326,7 +2388,7 @@ zonelist_scan:
 				 * when the watermark is between the low and
 				 * min watermarks.
 				 */
-				/* 没有回收到足够的内存，如果阀值是min，则跳到 this_zone_full 标记此区已满，因为min是这三个阀值当中最小的阀值 */
+				/* 如果是按照min阀值进行分配的(在慢速分配中会尝试)，或者从此zone回收到一些页框了(但不足以分配)，则跳到this_zone_full，标记此zone */
 				if (((alloc_flags & ALLOC_WMARK_MASK) == ALLOC_WMARK_MIN) ||
 				    ret == ZONE_RECLAIM_SOME)
 					goto this_zone_full;
@@ -2336,9 +2398,13 @@ zonelist_scan:
 		}
 
 try_this_zone:
-		/* 尝试从这个管理区获取连续页框，这个管理区有足够的页框分配 */
+		/* 尝试从这个zone获取连续页框
+		 * 只有当此zone中空闲页框数量 - 本次需要分配的数量 > 此zone的low阀值，这样才能执行到这
+		 * 如果本意从preferred_zone分配内存，但是preferred_zone没有足够内存，到到了此zone进行分配，那么分配的页数量会统计到此zone的NR_ALLOC_BATCH
+		 */
 		page = buffered_rmqueue(preferred_zone, zone, order,
 						gfp_mask, migratetype);
+		/* 分配到了连续页框，跳出循环 */
 		if (page)
 			break;
 this_zone_full:
@@ -2358,7 +2424,7 @@ this_zone_full:
 		 */
 		/* 如果分配时有 ALLOC_NO_WATERMARKS 标记则记录到页描述符中 */
 		page->pfmemalloc = !!(alloc_flags & ALLOC_NO_WATERMARKS);
-		/* 将页描述符返回 */
+		/* 将连续页框中第一个页的页描述符返回 */
 		return page;
 	}
 
@@ -2370,11 +2436,19 @@ this_zone_full:
 	 * include remote zones now, before entering the slowpath and waking
 	 * kswapd: prefer spilling to a remote zone over swapping locally.
 	 */
-	/* 如果第一次ALLOC_FAIR分配没有能够分配到内存，第二次尝试非ALLOC_FAIR分配 */
+	 /* 这里是失败时才会 */
+	/* 如果第一次ALLOC_FAIR分配没有能够分配到内存，第二次尝试非ALLOC_FAIR分配 
+	 * 第二次会遍历zonelist中其他node上的zone
+	 * 而第一次公平分配不会
+	 */
 	if (alloc_flags & ALLOC_FAIR) {
 		alloc_flags &= ~ALLOC_FAIR;
+		/* nr_fair_skipped不为0，说明此node有些zone的batch页已经用尽，这里要增加一些给它 */
 		if (nr_fair_skipped) {
 			zonelist_rescan = true;
+			/* 重新设置除目标zone之外，node中在此目标zone前面的zone的batch页数量大小 
+			 * 设置为: batch页数量 = high阀值 - 低阀值 - 当前batch数量
+			 */
 			reset_alloc_batches(preferred_zone);
 		}
 		if (nr_online_nodes > 1)
@@ -2560,6 +2634,7 @@ out:
 /* Try memory compaction for high-order allocations before reclaim */
 /* 伙伴系统内存压缩函数 
  * order是本次分配时需要获取的页框数量
+ * mode保存的是使用的模式，异步，同步，轻同步三种
  */
 static struct page *
 __alloc_pages_direct_compact(gfp_t gfp_mask, unsigned int order,
@@ -2576,7 +2651,7 @@ __alloc_pages_direct_compact(gfp_t gfp_mask, unsigned int order,
 		return NULL;
 
 	current->flags |= PF_MEMALLOC;
-	/* 尝试压缩内存，第一次异步，第二次同步 */
+	/* 尝试对zonelist中所有zone进行压缩内存 */
 	compact_result = try_to_compact_pages(zonelist, order, gfp_mask,
 						nodemask, mode,
 						contended_compaction,
@@ -2603,15 +2678,18 @@ __alloc_pages_direct_compact(gfp_t gfp_mask, unsigned int order,
 	drain_pages(get_cpu());
 	put_cpu();
 
+	/* 再次尝试获取连续页框 */
 	page = get_page_from_freelist(gfp_mask, nodemask,
 			order, zonelist, high_zoneidx,
 			alloc_flags & ~ALLOC_NO_WATERMARKS,
 			preferred_zone, classzone_idx, migratetype);
 
+	/* 获取到了连续页框 */
 	if (page) {
 		struct zone *zone = page_zone(page);
-
+		
 		zone->compact_blockskip_flush = false;
+		/* 重置此zone的压缩推迟计数 */
 		compaction_defer_reset(zone, order, true);
 		count_vm_event(COMPACTSUCCESS);
 		return page;
@@ -2622,6 +2700,7 @@ __alloc_pages_direct_compact(gfp_t gfp_mask, unsigned int order,
 	 * should succeed, so it did not defer compaction. But here we know
 	 * that it didn't succeed, so we do the defer.
 	 */
+	/* 同步情况，并且在此zone压缩后内存足够进行分配了，但是又没有分配成功，则提高此zone的推迟计数器，让其每次推迟更多 */
 	if (last_compact_zone && mode != MIGRATE_ASYNC)
 		defer_compaction(last_compact_zone, order);
 
@@ -2648,6 +2727,7 @@ __alloc_pages_direct_compact(gfp_t gfp_mask, unsigned int order,
 #endif /* CONFIG_COMPACTION */
 
 /* Perform direct synchronous page reclaim */
+/* 内存回收 */
 static int
 __perform_reclaim(gfp_t gfp_mask, unsigned int order, struct zonelist *zonelist,
 		  nodemask_t *nodemask)
@@ -2655,20 +2735,24 @@ __perform_reclaim(gfp_t gfp_mask, unsigned int order, struct zonelist *zonelist,
 	struct reclaim_state reclaim_state;
 	int progress;
 
-	/* 检查是否需要调度 */
+	/* 检查是否需要调度，需要则调度 */
 	cond_resched();
 
 	/* We now go into synchronous reclaim */
+	/* 这行暂时不清楚用途，用于cgroup的cpuset */
 	cpuset_memory_pressure_bump();
+	/* 标志此进程正在分配内存中 */
 	current->flags |= PF_MEMALLOC;
 	lockdep_set_current_reclaim_state(gfp_mask);
 	reclaim_state.reclaimed_slab = 0;
 	current->reclaim_state = &reclaim_state;
 
+	/*  */
 	progress = try_to_free_pages(zonelist, order, gfp_mask, nodemask);
 
 	current->reclaim_state = NULL;
 	lockdep_clear_current_reclaim_state();
+	/* 取消标志此进程正在分配内存中 */
 	current->flags &= ~PF_MEMALLOC;
 
 	cond_resched();
@@ -2677,7 +2761,9 @@ __perform_reclaim(gfp_t gfp_mask, unsigned int order, struct zonelist *zonelist,
 }
 
 /* The really slow allocator path where we enter direct reclaim */
-/* 内存回收 */
+/* 对所有zonelist中的zone进行一次直接内存回收 
+ * 
+ */
 static inline struct page *
 __alloc_pages_direct_reclaim(gfp_t gfp_mask, unsigned int order,
 	struct zonelist *zonelist, enum zone_type high_zoneidx,
@@ -2687,6 +2773,7 @@ __alloc_pages_direct_reclaim(gfp_t gfp_mask, unsigned int order,
 	struct page *page = NULL;
 	bool drained = false;
 
+	/* 内存回收 */
 	*did_some_progress = __perform_reclaim(gfp_mask, order, zonelist,
 					       nodemask);
 	if (unlikely(!(*did_some_progress)))
@@ -2734,6 +2821,7 @@ __alloc_pages_high_priority(gfp_t gfp_mask, unsigned int order,
 			preferred_zone, classzone_idx, migratetype);
 
 		if (!page && gfp_mask & __GFP_NOFAIL)
+			/* 等待一些页框的回收回写完成 */
 			wait_iff_congested(preferred_zone, BLK_RW_ASYNC, HZ/50);
 	} while (!page && (gfp_mask & __GFP_NOFAIL));
 
@@ -2772,6 +2860,7 @@ gfp_to_alloc_flags(gfp_t gfp_mask)
 	 * policy or is asking for __GFP_HIGH memory.  GFP_ATOMIC requests will
 	 * set both ALLOC_HARDER (atomic == true) and ALLOC_HIGH (__GFP_HIGH).
 	 */
+	/* 如果是GFP_ATOMIC，那么设置分配标记应该是__GFP_HIGH和__GFP_HARDER */
 	alloc_flags |= (__force int) (gfp_mask & __GFP_HIGH);
 
 	if (atomic) {
@@ -2790,10 +2879,13 @@ gfp_to_alloc_flags(gfp_t gfp_mask)
 		alloc_flags |= ALLOC_HARDER;
 
 	if (likely(!(gfp_mask & __GFP_NOMEMALLOC))) {
+		/* 分配标志中包含__GFP_MEMALLOC */
 		if (gfp_mask & __GFP_MEMALLOC)
 			alloc_flags |= ALLOC_NO_WATERMARKS;
+		/* 处于软中断中，并且当前进程被设为允许使用保留内存 */
 		else if (in_serving_softirq() && (current->flags & PF_MEMALLOC))
 			alloc_flags |= ALLOC_NO_WATERMARKS;
+		/* 不在中断中，并且当前进程 被设置为允许使用保留内存 或者是正在被oom的进程 */
 		else if (!in_interrupt() &&
 				((current->flags & PF_MEMALLOC) ||
 				 unlikely(test_thread_flag(TIF_MEMDIE))))
@@ -2867,7 +2959,15 @@ restart:
 	 * reclaim. Now things get more complex, so set up alloc_flags according
 	 * to how we want to proceed.
 	 */
-	/* 根据传入标志确定其他的一些标志 */
+	/* 根据传入标志确定其他的一些标志 
+	 * 这里会默认使用min阀值进行内存分配
+	 * 如果gfp_mask是GFP_ATOMIC，那么这个alloc_flags应该是__GFP_HIGH | __GFP_HARDER
+	 *
+	 * 如果标记有__GFP_MEMALLOC，或者
+	 * 处于软中断中，并且当前进程被设为允许使用保留内存，或者
+	 * 不在中断中，并且当前进程 被设置为允许使用保留内存 或者是正在被oom的进程
+	 * 那么就会标记ALLOC_NO_WATERMARKS，表示忽略阀值进行分配
+	 */
 	alloc_flags = gfp_to_alloc_flags(gfp_mask);
 
 	/*
@@ -2884,7 +2984,7 @@ restart:
 
 rebalance:
 	/* This is the last chance, in general, before the goto nopage. */
-	/* 在唤醒回收线程之后再次尝试获取页框，这里不太明白，怎么保证了kswapd已经回收了内存，因为有可能会在kswapd还没运行之前就执行到这一步吧 */
+	/* 这里会用min阀值再次尝试获取页框，如果这次尝试还是没申请到页框，就要走漫长的步骤了 */
 	page = get_page_from_freelist(gfp_mask, nodemask, order, zonelist,
 			high_zoneidx, alloc_flags & ~ALLOC_NO_WATERMARKS,
 			preferred_zone, classzone_idx, migratetype);
@@ -2893,6 +2993,13 @@ rebalance:
 		goto got_pg;
 
 	/* Allocate without watermarks if the context allows */
+	/* 如果标记了不关注阀值进行分配，这样会有可能使用预留的内存进行分配 
+	 * 如果标记有__GFP_MEMALLOC，或者
+	 * 处于软中断中，并且当前进程被设为允许使用保留内存，或者
+	 * 不在中断中，并且当前进程 被设置为允许使用保留内存 或者是正在被oom的进程
+	 * 那么就会进行这种分配
+	 * 而平常可能用到的GFP_ATOMIC，则不是这种分配，GFP_ATOMIC会在zone_watermark_ok()中通过降低阀值进行判断，它不会用到预留的内存
+	 */
 	if (alloc_flags & ALLOC_NO_WATERMARKS) {
 		/*
 		 * Ignore mempolicies if ALLOC_NO_WATERMARKS on the grounds
@@ -2902,7 +3009,9 @@ rebalance:
 		/* 这里就是还是没有获取到，尝试忽略阀值再次进行获取页框 */
 		zonelist = node_zonelist(numa_node_id(), gfp_mask);
 
-		/* 尝试获取页框，这里不调用zone_watermark_ok()，也就是忽略了阀值，使用管理区预留的页框 */
+		/* 尝试获取页框，这里不调用zone_watermark_ok()，也就是忽略了阀值，使用管理区预留的页框 
+		 * 当没有获取到时，如果标记有__GFP_NOFAIL，则进行循环不停地分配，直到获取到页框
+		 */
 		page = __alloc_pages_high_priority(gfp_mask, order,
 				zonelist, high_zoneidx, nodemask,
 				preferred_zone, classzone_idx, migratetype);
@@ -2936,7 +3045,10 @@ rebalance:
 	 * Try direct compaction. The first pass is asynchronous. Subsequent
 	 * attempts after direct reclaim are synchronous
 	 */
-	/* 通过压缩看能否有多余的页框，通过页面迁移实现，第一次调用是异步的，第二次是同步的，要进入这里，有个前提就是分配内存的标志中必须允许阻塞(__GFP_WAIT) */
+	/* 通过压缩看能否有多余的页框，通过页面迁移实现，这里的内存压缩是异步模式，要进入这里，有个前提就是分配内存的标志中必须允许阻塞(__GFP_WAIT)，大多数情况分配都允许阻塞
+	 * 只会对MIRGATE_MOVABLE和MIGRATE_CMA类型的页进行移动，并且不允许阻塞
+	 * 对zonelist的每个zone进行一次异步内存压缩
+	 */
 	page = __alloc_pages_direct_compact(gfp_mask, order, zonelist,
 					high_zoneidx, nodemask, alloc_flags,
 					preferred_zone,
@@ -2982,14 +3094,18 @@ rebalance:
 	 * fault, so use asynchronous memory compaction for THP unless it is
 	 * khugepaged trying to collapse.
 	 */
+	/* 设置第二次内存压缩为轻同步模式，当第一次内存压缩后还是没有分配到足够页框时会使用
+	 * 轻同步内存压缩两有一种情况会发生
+	 * 在申请内存时内存不足，通过第一次异步内存压缩后，还是不足以分配连续页框后
+	 * 1.明确禁止处理透明大页的时候，可以进行轻同步内存压缩
+	 * 2.如果是内核线程，可以进行轻同步内存压缩(即使没有禁止处理透明大页的情况)
+	 */
 	if ((gfp_mask & GFP_TRANSHUGE) != GFP_TRANSHUGE ||
 						(current->flags & PF_KTHREAD))
 		migration_mode = MIGRATE_SYNC_LIGHT;
 
 	/* Try direct reclaim and then allocating */
-	/* 进行内存回收，然后在里面继续分配，返回分配到的内存的第一个页框
-	 * 回收的数量保存在did_some_progress中，有可能回收到了页框，但是并不够分配
-	 */
+	/* 进行直接内存回收 */
 	page = __alloc_pages_direct_reclaim(gfp_mask, order,
 					zonelist, high_zoneidx,
 					nodemask,
@@ -3013,7 +3129,9 @@ rebalance:
 			if ((current->flags & PF_DUMPCORE) &&
 			    !(gfp_mask & __GFP_NOFAIL))
 				goto nopage;
-			/* 杀死其他进程后再尝试 */
+			/* 杀死其他进程后再尝试，里面会使用high阀值进行尝试分配
+			 * 是希望通过杀死进程获取比较多的内存?
+			 */
 			page = __alloc_pages_may_oom(gfp_mask, order,
 					zonelist, high_zoneidx,
 					nodemask, preferred_zone,
@@ -3062,7 +3180,10 @@ rebalance:
 		 * direct reclaim and reclaim/compaction depends on compaction
 		 * being called after reclaim so call directly if necessary
 		 */
-		/* 不需要重试，这次再次压缩获取内存，这里是同步方式 */
+		/* 对zonelist中的每个zone进行轻同步内存压缩，然后在里面继续分配，返回分配到的内存的第一个页框
+		 * 此模式下允许进行大多数操作的阻塞，但不会对隔离出来需要移动的脏页进行回写操作，也不会等待正在回写的脏页回写完成，会阻塞去获取锁
+		 * 回收的数量保存在did_some_progress中，有可能回收到了页框，但是并不够分配
+		 */
 		page = __alloc_pages_direct_compact(gfp_mask, order, zonelist,
 					high_zoneidx, nodemask, alloc_flags,
 					preferred_zone,
@@ -3088,18 +3209,24 @@ got_pg:
 /*
  * This is the 'heart' of the zoned buddy allocator.
  */
+/* gfp_mask: 上层要求分配内存时使用的标志
+ * order: 需要的连续页框的order值，如果是1个页框，则为0
+ * zonelist: 合适的zone列表
+ * nodemask: node结点掩码，用于判断允许从哪些node上分配
+ */
 struct page *
 __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
 			struct zonelist *zonelist, nodemask_t *nodemask)
 {
 	enum zone_type high_zoneidx = gfp_zone(gfp_mask);
+	/* preferred_zone指向第一个合适的管理区 */	
 	struct zone *preferred_zone;
 	struct zoneref *preferred_zoneref;
 	struct page *page = NULL;
 	/* 从gfp_mask中获取选定的页框类型，当中只会检查__GFP_MOVABLE和__GFP_RECLAIMABLE */
 	int migratetype = gfpflags_to_migratetype(gfp_mask);
 	unsigned int cpuset_mems_cookie;
-	/* 这个需要注意一下，之后分配是会根据这个flags进行一定的操作 */
+	/* 这个需要注意一下，之后分配是会根据这个flags进行一定的操作，默认是使用zone的低阀值判断是否需要进行内存回收 */
 	int alloc_flags = ALLOC_WMARK_LOW|ALLOC_CPUSET|ALLOC_FAIR;
 	int classzone_idx;
 
@@ -3107,7 +3234,9 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
 
 	lockdep_trace_alloc(gfp_mask);
 
-	/* 如果设置了__GFP_WAIT，就检查当前进程是否需要调度，如果要则会进行调度 */
+	/* 如果设置了__GFP_WAIT，就检查当前进程是否需要调度，如果要则会进行调度
+	 * 大多数情况的分配都会有__GFP_WAIT标志
+	 */
 	might_sleep_if(gfp_mask & __GFP_WAIT);
 
 	/* 检查gfp_mask和order是否符合要求，就是跟fail_page_alloc里面每一项对比检查 */
@@ -3132,7 +3261,9 @@ retry_cpuset:
 	cpuset_mems_cookie = read_mems_allowed_begin();
 
 	/* The preferred zone is used for statistics later */
-	/* 获取链表中第一个管理区，每一次retry_cpuset就是在一个管理区中进行分配 */
+	/* 获取链表中第一个管理区，每一次retry_cpuset就是在一个管理区中进行分配 
+	 * preferred_zone指向第一个合适的管理区
+	 */
 	preferred_zoneref = first_zones_zonelist(zonelist, high_zoneidx,
 				nodemask ? : &cpuset_current_mems_allowed,
 				&preferred_zone);
@@ -3142,8 +3273,11 @@ retry_cpuset:
 	/* 管理区的类型的偏移量，0是 ZONE_DMA , 1是 ZONE_NORMAL , 2是 ZONE_HIGHMEM , 3是 ZONE_MOVABLE */
 	classzone_idx = zonelist_zone_idx(preferred_zoneref);
 
-	/* 第一次尝试分配页框，第一次是快速分配 */
-	/* 遍历zonelist，尝试获取2的order次方个连续的页框 */
+	/* 第一次尝试分配页框，这里是快速分配
+	 * 快速分配时以low阀值为标准
+	 * 遍历zonelist，尝试获取2的order次方个连续的页框 
+	 * 在遍历zone时，如果此zone当前空闲内存减去需要申请的内存之后，空闲内存是低于low阀值，那么此zone会进行快速内存回收
+	 */
 	page = get_page_from_freelist(gfp_mask|__GFP_HARDWALL, nodemask, order,
 			zonelist, high_zoneidx, alloc_flags,
 			preferred_zone, classzone_idx, migratetype);
@@ -3155,9 +3289,17 @@ retry_cpuset:
 		 * can deadlock because I/O on the device might not
 		 * complete.
 		 */
-		/* 如果没有分配到所需连续的页框，这里会尝试第二次分配，第二次是慢速分配 */
+		/* 如果没有分配到所需连续的页框，这里会尝试第二次分配，这次是慢速分配，并且同样分配时不允许进行IO操作 
+		 * 如果当前进程current->flags标志了PF_MEMALLOC_NOIO标志，表示进程获取内存时禁止IO操作，则返回清除了__GFP_IO和__GFP_FS的gfp_mask
+		 * 而gfp_mask绝大多数情况都是允许__GFP_IO和__GFP_FS标志的
+		 */
 		gfp_mask = memalloc_noio_flags(gfp_mask);
-		/* 如果之前没有分配成功，这里尝试进入慢速分配，在这个函数中，会尝试唤醒页框回收线程，然后再进行分配 */
+		/* 如果之前没有分配成功，这里尝试进入慢速分配，在这个函数中，会尝试唤醒页框回收线程，然后再进行分配 
+		 * 慢速分配首先会唤醒kswapd线程进行内存回收
+		 * 然后如果标记了忽略阀值，则从保留的内存里回收
+		 * 然后进行内存压缩
+		 * 最后再尝试直接内存回收
+		 */
 		page = __alloc_pages_slowpath(gfp_mask, order,
 				zonelist, high_zoneidx, nodemask,
 				preferred_zone, classzone_idx, migratetype);
@@ -6060,24 +6202,35 @@ static void setup_per_zone_lowmem_reserve(void)
 	calculate_totalreserve_pages();
 }
 
+/* 设置每个zone的阀值 */
 static void __setup_per_zone_wmarks(void)
 {
+	/* 一个zone允许管理的最小页框值，如果是常规的PAGE_SHIFT(12)，那么这里为256  */
 	unsigned long pages_min = min_free_kbytes >> (PAGE_SHIFT - 10);
+	/* 除了高端内存区，所有页框数量 */
 	unsigned long lowmem_pages = 0;
 	struct zone *zone;
 	unsigned long flags;
 
 	/* Calculate total number of !ZONE_HIGHMEM pages */
+	/* 计算所有node中除了高端内存区其他所有的页框总数量 
+	 * 保存到lowmem_pages中
+	 */
 	for_each_zone(zone) {
 		if (!is_highmem(zone))
 			lowmem_pages += zone->managed_pages;
 	}
 
+	/* 遍历所有node的所有zone */
 	for_each_zone(zone) {
 		u64 tmp;
 
+		/* 上锁，会禁止中断 */
 		spin_lock_irqsave(&zone->lock, flags);
+
+		/* tmp等于此管理区管理的页框数量 * 256 */
 		tmp = (u64)pages_min * zone->managed_pages;
+		/* tmp = tmp / lowmem_pages */
 		do_div(tmp, lowmem_pages);
 		if (is_highmem(zone)) {
 			/*
@@ -6089,8 +6242,11 @@ static void __setup_per_zone_wmarks(void)
 			 * deltas controls asynch page reclaim, and so should
 			 * not be capped for highmem.
 			 */
+			/* 如果是高端内存管理区 */
+			
 			unsigned long min_pages;
 
+			/* 高端内存管理区最小空闲页框范围在32~128之间，如果 zone->managed_pages / 1024 在这之间那么就是这个 zone->managed_pages / 1024 */
 			min_pages = zone->managed_pages / 1024;
 			min_pages = clamp(min_pages, SWAP_CLUSTER_MAX, 128UL);
 			zone->watermark[WMARK_MIN] = min_pages;
@@ -6099,6 +6255,9 @@ static void __setup_per_zone_wmarks(void)
 			 * If it's a lowmem zone, reserve a number of pages
 			 * proportionate to the zone's size.
 			 */
+			/* 非高端内存管理区 */
+
+			 /*  */
 			zone->watermark[WMARK_MIN] = tmp;
 		}
 
@@ -6157,8 +6316,10 @@ static void __meminit calculate_zone_inactive_ratio(struct zone *zone)
 	unsigned int gb, ratio;
 
 	/* Zone size in gigabytes */
+	/* zone管理的内存的GB大小 */
 	gb = zone->managed_pages >> (30 - PAGE_SHIFT);
 	if (gb)
+		/* ratio等于 根号(10 * 管理区GB数) */
 		ratio = int_sqrt(10 * gb);
 	else
 		ratio = 1;

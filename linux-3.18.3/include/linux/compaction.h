@@ -51,21 +51,26 @@ extern unsigned long compaction_suitable(struct zone *zone, int order);
  * allocation success. 1 << compact_defer_limit compactions are skipped up
  * to a limit of 1 << COMPACT_MAX_DEFER_SHIFT
  */
-/* 压缩失败会调用，提高推迟压缩次数 */
+/* 推迟压缩，提高推迟压缩计数
+ * 此函数在zone进行内存压缩之后，还是无法从此zone获取连续页框时调用，为了让此zone更多的推迟进行内存压缩，反正短期内在此zone进行内存压缩也没有效果
+ */
 static inline void defer_compaction(struct zone *zone, int order)
 {
 	zone->compact_considered = 0;
+	/* 推迟计数++ */
 	zone->compact_defer_shift++;
 
+	/* 此zone此次压缩失败的order值保存到zone->compact_order_failed */
 	if (order < zone->compact_order_failed)
 		zone->compact_order_failed = order;
 
+	/* 推迟计数器最多只能等于COMPACT_MAX_DEFER_SHIFT */
 	if (zone->compact_defer_shift > COMPACT_MAX_DEFER_SHIFT)
 		zone->compact_defer_shift = COMPACT_MAX_DEFER_SHIFT;
 }
 
 /* Returns true if compaction should be skipped this time */
-/* 用于推迟本次内存压缩，但是有个限度 */
+/* 用于推迟本次内存压缩，但是有个限度，这个限度就是 1 << zone->compact_defer_shift */
 static inline bool compaction_deferred(struct zone *zone, int order)
 {
 	unsigned long defer_limit = 1UL << zone->compact_defer_shift;
@@ -90,10 +95,12 @@ static inline bool compaction_deferred(struct zone *zone, int order)
 static inline void compaction_defer_reset(struct zone *zone, int order,
 		bool alloc_success)
 {
+	/* 是因为分配成功导致重置压缩推迟的 */
 	if (alloc_success) {
 		zone->compact_considered = 0;
 		zone->compact_defer_shift = 0;
 	}
+	/* 如果本次压缩成功了，则将compact_order_failed设置为本次压缩的order + 1 */
 	if (order >= zone->compact_order_failed)
 		zone->compact_order_failed = order + 1;
 }
