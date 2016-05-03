@@ -58,15 +58,18 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/vmscan.h>
 
+/* 扫描控制结构，用于内存回收和内存压缩 */
 struct scan_control {
 	/* How many pages shrink_list() should reclaim */
 	/* 需要回收的页框数量 */
 	unsigned long nr_to_reclaim;
 
 	/* This context's GFP mask */
+	/* 申请内存时使用的分配标志 */
 	gfp_t gfp_mask;
 
 	/* Allocation order */
+	/* 申请内存时使用的order值，因为只有申请内存，然后内存不足时才会进行扫描 */
 	int order;
 
 	/*
@@ -84,9 +87,14 @@ struct scan_control {
 	struct mem_cgroup *target_mem_cgroup;
 
 	/* Scan (total_size >> priority) pages at once */
-	/* 代表一次扫描(total_size >> priority)个页框 */
+	/* 扫描优先级，代表一次扫描(total_size >> priority)个页框 
+	 * 优先级越低，一次扫描的页框数量就越多
+	 * 优先级越高，一次扫描的数量就越少
+	 * 默认优先级为12
+	 */
 	int priority;
 
+	/* 是否能够进行回写操作(与分配标志的__GFP_IO和__GFP_FS有关) */
 	unsigned int may_writepage:1;
 
 	/* Can mapped pages be reclaimed? */
@@ -104,9 +112,11 @@ struct scan_control {
 	unsigned int compaction_ready:1;
 
 	/* Incremented by the number of inactive pages that were scanned */
+	/* 已经扫描的页框数量 */
 	unsigned long nr_scanned;
 
 	/* Number of pages freed so far during a call to shrink_zones() */
+	/* 已经回收的页框数量 */
 	unsigned long nr_reclaimed;
 };
 
@@ -1504,7 +1514,10 @@ unsigned long reclaim_clean_pages_from_list(struct zone *zone,
  *
  * returns 0 on success, -ve errno on failure.
  */
-/* 将page从lru中拿出来，这里更多的是设置其参数，比如清除PageLRU标志，并没有实际动作从lru中拿出此页 */
+/* 将page从lru中拿出来，这里更多的是设置其参数，比如清除PageLRU标志，并没有实际动作从lru中拿出此页 
+ * 返回0: 表示此页成功从lru链表中拿出来
+ * 否则返回错误信息
+ */
 int __isolate_lru_page(struct page *page, isolate_mode_t mode)
 {
 	int ret = -EINVAL;
@@ -1515,6 +1528,7 @@ int __isolate_lru_page(struct page *page, isolate_mode_t mode)
 		return ret;
 
 	/* Compaction should not handle unevictable pages but CMA can do so */
+	/* 当前mode表示不处理被锁在内存中的页，并且此页被锁在内存中 */
 	if (PageUnevictable(page) && !(mode & ISOLATE_UNEVICTABLE))
 		return ret;
 
@@ -1571,7 +1585,7 @@ int __isolate_lru_page(struct page *page, isolate_mode_t mode)
 		 * sure the page is not being freed elsewhere -- the
 		 * page release code relies on it.
 		 */
-		/* 清除此页在lru的标志 */
+		/* 清除此页在lru的标志，因为此页算是已经从lru链表中拿出来了 */
 		ClearPageLRU(page);
 		ret = 0;
 	}
@@ -1600,7 +1614,7 @@ int __isolate_lru_page(struct page *page, isolate_mode_t mode)
  * returns how many pages were moved onto *@dst.
  */
 /* 从lruvec中的lru类型的lru链表获取页，从lru链表尾开始拿，然后放入dst链表中
- * 调用此函数前必须给lruvec上锁，锁为zone->lru_lock 
+ * 调用此函数前必须给lruvec上锁
  */
 static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		struct lruvec *lruvec, struct list_head *dst,
@@ -1651,6 +1665,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		}
 	}
 
+	/* 总共扫描的页数量 */
 	*nr_scanned = scan;
 	trace_mm_vmscan_lru_isolate(sc->order, nr_to_scan, scan,
 				    nr_taken, mode, is_file_lru(lru));
@@ -2063,9 +2078,10 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 	 * is congested. Allow kswapd to continue until it starts encountering
 	 * unqueued dirty pages or cycling through the LRU too quickly.
 	 */
+	/* 非kswapd的情况下，如果现在设备回写压力较大 */
 	if (!sc->hibernation_mode && !current_is_kswapd() &&
 	    current_may_throttle())
-	    /* 如果现在设备回写压力较大，则等待一下设备 */
+	    /* 等待一下设备 */
 		wait_iff_congested(zone, BLK_RW_ASYNC, HZ/10);
 
 	trace_mm_vmscan_lru_shrink_inactive(zone->zone_pgdat->node_id,
@@ -2094,9 +2110,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
  * But we had to alter page->flags anyway.
  */
 
-/* 将list链表中的页放入到lruvec->lists[lru]链表中，不需要放入的页放到pages_to_free链表中
- * 会清除PG_active标志
- */
+/* 将list链表中的页放入到lruvec->lists[lru]链表中，不需要放入的页放到pages_to_free链表中 */
 static void move_active_pages_to_lru(struct lruvec *lruvec,
 				     struct list_head *list,
 				     struct list_head *pages_to_free,
@@ -2129,7 +2143,8 @@ static void move_active_pages_to_lru(struct lruvec *lruvec,
 		/* 计数器 */
 		pgmoved += nr_pages;
 
-		/* 如果此页的引用次数 page->_count - 1 == 0，说明只有隔离的时候对其page->_count进行了++，也就是说此页已经没有其他进程或模块引用了
+		/* 这里对页的引用次数 page->_count--，然后判断是否为0
+		 * 如果此页的引用次数 page->_count--后等于0，说明只有隔离的时候对其page->_count进行了++，也就是说此页已经没有其他进程或模块引用了
 		 * 这种情况将此页放到page_to_free中，之后会准备释放，因为此页在lru中，所以引用次数为1说明没有页表引用了此页
 		 * 由于调用此函数前，此页基本是先被隔离到一个链表里的，而隔离的时候会对此page->_count++，这里正好成对
 		 */
@@ -2196,10 +2211,18 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	/* 将当前CPU的多个pagevec中的页都放入lru链表中 */
 	lru_add_drain();
 
-	/* 从kswapd调用过来的情况下，sc->may_unmap为1 */
+	/* 从kswapd调用过来的情况下，sc->may_unmap为1
+	 * 直接内存回收的情况，sc->may_unmap为1
+	 * 快速内存回收的情况，sc->may_unmap与zone_reclaim_mode有关
+	 */
 	if (!sc->may_unmap)
 		isolate_mode |= ISOLATE_UNMAPPED;
-	/* 从kswapd调用过来的情况下，sc->may_writepage = !laptop_mode */
+
+	
+	/* 从kswapd调用过来的情况下，sc->may_writepage与latptop_mode有关
+	 * 直接内存回收的情况，sc->may_writepage与latptop_mode有关
+	 * 快速内存回收的情况，sc->may_writepage与zone_reclaim_mode有关
+	 */
 	if (!sc->may_writepage)
 		isolate_mode |= ISOLATE_CLEAN;
 
@@ -2207,7 +2230,10 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	spin_lock_irq(&zone->lru_lock);
 
 	/* 从lruvec中lru类型链表的尾部拿出一些页隔离出来，放入到l_hold中，lru类型一般是LRU_ACTIVE_ANON或LRU_ACTIVE_FILE
-	 * 也就是从活动的lru链表中隔离出一些页，从活动的lru链表的尾部依次拿出
+	 * 也就是从活动的lru链表中隔离出一些页，从活动lru链表的尾部依次拿出
+	 * 当sc->may_unmap为0时，则不会将有进程映射的页隔离出来
+	 * 当sc->may_writepage为0时，则不会将脏页和正在回写的页隔离出来
+	 * 隔离出来的页会page->_count++
 	 * nr_taken保存拿出的页的数量
 	 */
 	nr_taken = isolate_lru_pages(nr_to_scan, lruvec, &l_hold,
@@ -2393,6 +2419,13 @@ static int inactive_list_is_low(struct lruvec *lruvec, enum lru_list lru)
 		return inactive_anon_is_low(lruvec);
 }
 
+/*
+ * 对lru链表进行处理
+ * lru: lru链表的类型
+ * nr_to_scan: 需要扫描的页框数量，此值 <= 32，当链表长度不足32时，就为链表长度
+ * lruvec: lru链表描述符，与lru参数结合就得出待处理的lru链表
+ * sc: 扫描控制结构
+ */
 static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
 				 struct lruvec *lruvec, struct scan_control *sc)
 {
@@ -2744,14 +2777,16 @@ static void shrink_lruvec(struct lruvec *lruvec, int swappiness,
 	 */
 	blk_start_plug(&plug);
 	/* 如果LRU_INACTIVE_ANON，LRU_ACTIVE_FILE，LRU_INACTIVE_FILE这三个其中一个需要扫描的页框数没有扫描完，那扫描就会继续 
-	 * 注意这里不会判断LRU_ACTIVE_ANON需要扫描的页框数是否扫描完
+	 * 注意这里不会判断LRU_ACTIVE_ANON需要扫描的页框数是否扫描完，这里原因大概是因为系统不太希望对匿名页lru链表中的页回收
 	 */
 	while (nr[LRU_INACTIVE_ANON] || nr[LRU_ACTIVE_FILE] ||
 					nr[LRU_INACTIVE_FILE]) {
 		unsigned long nr_anon, nr_file, percentage;
 		unsigned long nr_scanned;
 
-		/* 以LRU_INACTIVE_ANON，LRU_INACTIVE_ANON，LRU_INACTIVE_FILE，LRU_ACTIVE_FILE这个顺序遍历nr数组 */
+		/* 以LRU_INACTIVE_ANON，LRU_INACTIVE_ANON，LRU_INACTIVE_FILE，LRU_ACTIVE_FILE这个顺序遍历lru链表 
+		 * 然后对遍历到的lru链表进行扫描，一次最多32个页框
+		 */
 		for_each_evictable_lru(lru) {
 			/* nr[lru类型]如果有页框需要扫描 */
 			if (nr[lru]) {
@@ -2821,8 +2856,6 @@ static void shrink_lruvec(struct lruvec *lruvec, int swappiness,
 			percentage = nr_anon * 100 / scan_target;
 		} else {
 			/* 剩余需要扫描的文件页少于剩余需要扫描的匿名页时 */
-
-			
 			unsigned long scan_target = targets[LRU_INACTIVE_FILE] +
 						targets[LRU_ACTIVE_FILE] + 1;
 			lru = LRU_FILE;
@@ -2885,7 +2918,7 @@ static bool in_reclaim_compaction(struct scan_control *sc)
  * calls try_to_compact_zone() that it will have enough free pages to succeed.
  * It will give up earlier than that if there is difficulty reclaiming pages.
  */
-/* 判断是否继续对zone进行内存回收
+/* 判断是否继续对zone进行内存回收，主要是检查空闲页框数量能不能进行内存压缩
  * nr_reclaimed: 本次回收的数量
  * nr_scanned: 本次扫描的数量
  */
@@ -2898,6 +2931,7 @@ static inline bool should_continue_reclaim(struct zone *zone,
 	unsigned long inactive_lru_pages;
 
 	/* If not in reclaim/compaction mode, stop */
+	/* 如果不是在进行内存回收或者内存压缩，则返回 */
 	if (!in_reclaim_compaction(sc))
 		return false;
 
@@ -2952,7 +2986,8 @@ static inline bool should_continue_reclaim(struct zone *zone,
 }
 
 /* 对zone进行内存回收 
- * 返回是否回收到了页框
+ * 返回是否回收到了页框，而不是十分回收到了sc中指定数量的页框
+ * 即使没回收到sc中指定数量的页框，只要回收到了页框，就返回真
  */
 static bool shrink_zone(struct zone *zone, struct scan_control *sc)
 {
@@ -2979,6 +3014,7 @@ static bool shrink_zone(struct zone *zone, struct scan_control *sc)
 
 		/* 获取最上层的memcg
 		 * 如果没有指定开始的root，则默认是root_mem_cgroup
+		 * root_mem_cgroup管理的每个zone的lru链表就是每个zone完整的lru链表
  		 */
 		memcg = mem_cgroup_iter(root, NULL, &reclaim);
 		do {
@@ -2989,7 +3025,7 @@ static bool shrink_zone(struct zone *zone, struct scan_control *sc)
 			 * 如果内核没有开启memcg，那么就是zone->lruvec
 			 */
 			lruvec = mem_cgroup_zone_lruvec(zone, memcg);
-			/* 此值代表了进行swap的频率，此值较低时，那么就更多的进行文件页的回收，此值较高时，则更多进行匿名页的回收 */
+			/* 从memcg中获取swapiness，此值代表了进行swap的频率，此值较低时，那么就更多的进行文件页的回收，此值较高时，则更多进行匿名页的回收 */
 			swappiness = mem_cgroup_swappiness(memcg);
 
 			/* 对此memcg的lru链表进行回收工作 
@@ -3008,12 +3044,15 @@ static bool shrink_zone(struct zone *zone, struct scan_control *sc)
 			 * retry with decreasing priority if one round over the
 			 * whole hierarchy is not sufficient.
 			 */
+			/* 如果是对于整个zone进行回收，那么会遍历所有memcg，对所有memcg中此zone的lru链表进行回收 
+			 * 而如果只是针对某个memcg进行回收，如果回收到了足够内存则返回，如果没回收到足够内存，则对此memcg下面的memcg进行回收
+			 */
 			if (!global_reclaim(sc) &&
 					sc->nr_reclaimed >= sc->nr_to_reclaim) {
 				mem_cgroup_iter_break(root, memcg);
 				break;
 			}
-			/* 下一个memcg */
+			/* 下一个memcg，对于整个zone进行回收和对某个memcg进行回收但回收数量不足时会执行到此 */
 			memcg = mem_cgroup_iter(root, memcg, &reclaim);
 		} while (memcg);
 		
@@ -3026,9 +3065,10 @@ static bool shrink_zone(struct zone *zone, struct scan_control *sc)
 			reclaimable = true;
 
 	/* 判断是否再次此zone进行内存回收 
-	 * 如果本次没回收到页框则跳出
-	 * 判断标准: 希望回收目标order多一倍的页框，如果非活动页框数量足够回收比目标order多一倍的页，
-	 * 或者 还不能够进行内存压缩，则继续回收，直到满足这两个条件或者一次循环后没有回收的页框为止
+	 * 继续对此zone进行内存回收有两种情况:
+	 * 1. 没有回收到比目标order值多一倍的数量页框，并且非活动lru链表中的页框数量 > 目标order多一倍的页
+	 * 2. 此zone不满足内存压缩的条件，则继续对此zone进行内存回收
+	 * 而当本次内存回收完全没有回收到页框时则返回，这里大概意思就是想回收比order更多的页框
 	 */
 	} while (should_continue_reclaim(zone, sc->nr_reclaimed - nr_reclaimed,
 					 sc->nr_scanned - nr_scanned, sc));
@@ -3449,13 +3489,23 @@ unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 {
 	unsigned long nr_reclaimed;
 	struct scan_control sc = {
+		/* 打算回收32个页框 */
 		.nr_to_reclaim = SWAP_CLUSTER_MAX,
 		.gfp_mask = (gfp_mask = memalloc_noio_flags(gfp_mask)),
+		/* 本次内存分配的order值 */
 		.order = order,
+		/* 允许进行回收的node掩码 */
 		.nodemask = nodemask,
+		/* 优先级为默认的12 */
 		.priority = DEF_PRIORITY,
+		/* 与/proc/sys/vm/laptop_mode文件有关
+		 * laptop_mode为0，则允许进行回写操作，即使允许回写，直接内存回收也不能对脏文件页进行回写
+		 * 不过允许回写时，可以对非文件页进行回写
+		 */
 		.may_writepage = !laptop_mode,
+		/* 允许进行unmap操作 */
 		.may_unmap = 1,
+		/* 允许进行非文件页的操作 */
 		.may_swap = 1,
 	};
 
@@ -3997,6 +4047,9 @@ static unsigned long balance_pgdat(pg_data_t *pgdat, int order,
 			 * that that high watermark would be met at 100%
 			 * efficiency.
 			 */
+			/* 里面也会检查此zone是否是平衡的，其实就是zone中空闲内存减去2的order次方数量页框后，页框数量还大于高阀值 
+			 * 不会对平衡的zone进行内存回收
+			 */
 			if (kswapd_shrink_zone(zone, end_zone, &sc,
 					lru_pages, &nr_attempted))
 				raise_priority = false;
@@ -4463,7 +4516,7 @@ static inline unsigned long zone_unmapped_file_pages(struct zone *zone)
 }
 
 /* Work out how many page cache pages we can reclaim in this reclaim_mode */
-/* 计算此zone可以回收的页数量 */
+/* 计算此zone可以回收的文件页数量 */
 static long zone_pagecache_reclaimable(struct zone *zone)
 {
 	long nr_pagecache_reclaimable;
@@ -4504,7 +4557,9 @@ static long zone_pagecache_reclaimable(struct zone *zone)
 /*
  * Try to free up some pages from this zone through reclaim.
  */
-/* 从get_page_from_freelist()这个快速分配路径从调用到的回收内存函数 
+/* 从get_page_from_freelist()这个分配路径从调用到的回收内存函数 
+ * 对于扫描到的非活动匿名页lru链表中的页: 可能进行回写，也可能进行unmap
+ * 对于扫描到的非活动文件页lru链表中的页: 不会进行回写，可能进行unmap
  * 只回收page->_count为0的页，也就是基本上可以直接回收的页(这些页已经进行过unmap、进行过回收回写)
  * 回收到的页框数量达到 1<< order值，就返回true，否则返回false
  */
@@ -4516,7 +4571,7 @@ static int __zone_reclaim(struct zone *zone, gfp_t gfp_mask, unsigned int order)
 	struct task_struct *p = current;
 	struct reclaim_state reclaim_state;
 	/*
-	 * 由于是快速分配导致的回收，这里就叫做快速回收，这里将所有page->_count为0的页都进行回收
+	 * 由于是分配导致的回收，这里就叫做快速回收，这里将所有page->_count为0的页都进行回收
 	 * 当对一个页进行回收时，会对此页进行unmap操作，然后将此页回写到磁盘中，由于在大多数内存回收的情况下，回写是异步的，也就是本次内存回收对此页提交一个回写申请，然后就返回了
 	 * 之后回写完成后，块层会通过此页的PG_reclaim判断到此页是因为要回收所以才回写的，就把此页放到非活动lru链表末尾
 	 * 当此页回写完成后，下次执行内存回收时，就可以发现此页的page->_count为0，直接回收此页
@@ -4531,15 +4586,15 @@ static int __zone_reclaim(struct zone *zone, gfp_t gfp_mask, unsigned int order)
 		.order = order,
 		/* 优先级为4，默认是12，会比12一次扫描更多lru链表中的页框，而且扫描次数会比优先级为12的少，并且如果回收过程中回收到了足够页框，就会返回 */
 		.priority = ZONE_RECLAIM_PRIORITY,
-		/* 通过/proc/sys/vm/zone_reclaim_mode文件设置是否允许将脏页回写到磁盘 
-		 * 当zone_reclaim_mode为0时，在这里是不允许页框回写的，我们这里假设允许
+		/* 通过/proc/sys/vm/zone_reclaim_mode文件设置是否允许将脏页回写到磁盘，即使允许，快速内存回收页不能对脏文件页进行回写操作
+		 * 当zone_reclaim_mode为0时，在这里是不允许页框回写的
 		 */
 		.may_writepage = !!(zone_reclaim_mode & RECLAIM_WRITE),
 		/* 通过/proc/sys/vm/zone_reclaim_mode文件设置是否允许将匿名页回写到swap分区 
-		 * 当zone_reclaim_mode为0时，在这里是不允许匿名页回写的，我们这里假设允许
+		 * 当zone_reclaim_mode为0时，在这里是不允许匿名页回写的
 		 */
 		.may_unmap = !!(zone_reclaim_mode & RECLAIM_SWAP),
-		/* 允许会匿名页操作 */
+		/* 允许对匿名页lru链表操作 */
 		.may_swap = 1,
 		/* 本结构还有一个
 		 * .target_mem_cgroup 表示是针对某个memcg，还是针对整个zone进行内存回收的，这里为空，也就是说这里是针对整个zone进行内存回收的
@@ -4570,7 +4625,7 @@ static int __zone_reclaim(struct zone *zone, gfp_t gfp_mask, unsigned int order)
 		 * priorities until we have enough memory freed.
 		 */
 		do {
-			/* 对此zone进行内存回收 */
+			/* 对此zone进行内存回收，内存回收的主要函数 */
 			shrink_zone(zone, &sc);
 			/* 没有回收到足够页框，并且循环次数没达到优先级次数，继续 */
 		} while (sc.nr_reclaimed < nr_pages && --sc.priority >= 0);

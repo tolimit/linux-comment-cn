@@ -413,7 +413,7 @@ struct address_space {
 	/* 所属inode */
 	struct inode		*host;		/* owner: inode, block_device */
 	/* 指向所属inode的所有页组成的基树的根 */
-	/* 如果此address_space是swap分区的， */
+	/* 如果此address_space是swap分区的，那么保存的是所有swap分区的页槽 */
 	struct radix_tree_root	page_tree;	/* radix tree of all pages */
 	/* 基树的自旋锁 */
 	spinlock_t		tree_lock;	/* and lock protecting it */

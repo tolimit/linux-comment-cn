@@ -900,7 +900,7 @@ static bool invalid_page_referenced_vma(struct vm_area_struct *vma, void *arg)
  * returns the number of ptes which referenced the page.
  */
 /* 检查此page最近是否有被访问
- * PRFA扫描一页调用一次此函数，如果此页的PG_referenced标志或者引用此页的页表项的Accessed置位，则表明此函数最近有被访问，返回1，否则返回0
+ * lru链表扫描时扫描一页调用一次此函数，如果此页的PG_referenced标志或者引用此页的页表项的Accessed置位，则表明此函数最近有被访问，返回1，否则返回0
  * 并且此函数每扫描一页都会将引用此页的页表项的Accessed清0，相当于从新开始直到下次page_referenced()扫描到此页时判断此页最近是否被访问
  * 此函数会涉及到通过反向映射找到引用此页的页表
  * 返回此页最近被多少个进程访问过
