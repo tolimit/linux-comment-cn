@@ -1909,6 +1909,10 @@ static void __split_huge_page(struct page *page,
  * from the hugepage.
  * Return 0 if the hugepage is split successfully otherwise return 1.
  */
+/* 将大页分隔为多个连续的4K页，存放到list链表中 
+ * 0为成功
+ * 1为失败
+ */
 int split_huge_page_to_list(struct page *page, struct list_head *list)
 {
 	struct anon_vma *anon_vma;

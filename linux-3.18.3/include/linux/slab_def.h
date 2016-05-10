@@ -6,7 +6,7 @@
 /*
  * Definitions unique to the original Linux SLAB allocator.
  */
-/* slab分配器中的SLAB高速缓存 */
+/* slab/slub分配器中描述一种SLAB缓存的结构 */
 struct kmem_cache {
 	/* 指向包含空闲对象的本地高速缓存，每个CPU有一个该结构，当有对象释放时，优先放入本地CPU高速缓存中 */
 	struct array_cache __percpu *cpu_cache;
@@ -76,9 +76,13 @@ struct kmem_cache {
 	unsigned long node_allocs;
 	unsigned long node_frees;
 	unsigned long node_overflow;
+	/* 申请对象时直接从CPU的SLAB对象高速缓存中申请成功的次数 */
 	atomic_t allochit;
+	/* 申请对象时没有从CPU的SLAB对象高速缓存中申请成功的次数 */
 	atomic_t allocmiss;
+	/* 对象释放时放回到CPU的SLAB对象高速缓存的次数 */
 	atomic_t freehit;
+	/* 对象释放时没有放回到CPU的SLAB对象高速缓存的次数 */
 	atomic_t freemiss;
 
 	/*

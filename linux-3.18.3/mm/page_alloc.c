@@ -361,20 +361,27 @@ static void free_compound_page(struct page *page)
 	__free_pages_ok(page, compound_order(page));
 }
 
+/* 如果用于大页，那么这里是对这些连续的页组成的大页进行处理 */
 void prep_compound_page(struct page *page, unsigned long order)
 {
 	int i;
 	int nr_pages = 1 << order;
 
+	/* page[1].lru.next设置为指向析构函数free_compound_page */
 	set_compound_page_dtor(page, free_compound_page);
+	/* page[1].lru.prev设置为大页的order值 */
 	set_compound_order(page, order);
+	/* 设置大页的第一个页的PG_head */
 	__SetPageHead(page);
 	for (i = 1; i < nr_pages; i++) {
 		struct page *p = page + i;
+		/* 大页中所有页的page->_count都设置为0 */
 		set_page_count(p, 0);
+		/* 大页中所有页的page->first_page都指向这段组成大页的连续页框的第一个页 */
 		p->first_page = page;
 		/* Make sure p->first_page is always valid for PageTail() */
 		smp_wmb();
+		/* 这段连续页框的最后一个页设置PG_tail标志 */
 		__SetPageTail(p);
 	}
 }
@@ -1047,7 +1054,13 @@ static int prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags)
 	if (gfp_flags & __GFP_ZERO)
 		prep_zero_page(page, order, gfp_flags);
 
-	/* 启用PAE扩展分页机制获取的页框 */
+	/* 如果分配时要求的是大页，这将这些连续页框组成为一个大页 
+	 * 具体做法:
+	 * 1.所有页的page->first_page指向第一个页
+	 * 2.第一个页置位PG_head
+	 * 3.最后一个页置位PG_tail
+	 * 4.所有页的page->_count设置为0
+	 */
 	if (order && (gfp_flags & __GFP_COMP))
 		prep_compound_page(page, order);
 
@@ -1116,7 +1129,7 @@ static int fallbacks[MIGRATE_TYPES][4] = {
  * Note that start_page and end_pages are not aligned on a pageblock
  * boundary. If alignment is required, use move_freepages_block()
  */
-/* 将此段页框移动到新的migratetype类型的伙伴系统链表中，正在使用的页会被跳过 */
+/* 将此段页框中的空闲页框移动到新的migratetype类型的伙伴系统链表中 */
 int move_freepages(struct zone *zone,
 			  struct page *start_page, struct page *end_page,
 			  int migratetype)
@@ -1157,7 +1170,7 @@ int move_freepages(struct zone *zone,
 		/* 从伙伴系统中拿出来，并放到新的migratetype类型中的order链表中 */
 		list_move(&page->lru,
 			  &zone->free_area[order].free_list[migratetype]);
-		/* 将这段空闲页框设置为新的类型page->index = migratetype */
+		/* 将这段空闲页框的首页设置为新的类型page->index = migratetype */
 		set_freepage_migratetype(page, migratetype);
 		/* 跳过此order个页框数量 */
 		page += 1 << order;
@@ -1168,14 +1181,21 @@ int move_freepages(struct zone *zone,
 	return pages_moved;
 }
 
-/* 调整为一个pageblock，将这个pageblock从旧了类型移动到新的类型链表中，order不变 */
+/* 将page所在的pageblock中所有空闲页框移动到新的类型链表中
+ * 比如一段连续页框块，order为8，那么就会移动zone->free_area[8].free_list[新的类型]这个空闲页框块中
+ */
 int move_freepages_block(struct zone *zone, struct page *page,
 				int migratetype)
 {
 	unsigned long start_pfn, end_pfn;
 	struct page *start_page, *end_page;
 
-	/* 调整为pageblock对齐 */
+	/* 根据page
+	 * 将start_pfn设置为page所在pageblock的起始页框
+	 * 将end_pfn设置为page所在pageblock的结束页框
+	 * start_page指向start_pfn对应的页描述符
+	 * end_page指向end_page对应的页描述符
+	 */
 	start_pfn = page_to_pfn(page);
 	start_pfn = start_pfn & ~(pageblock_nr_pages-1);
 	start_page = pfn_to_page(start_pfn);
@@ -1183,14 +1203,16 @@ int move_freepages_block(struct zone *zone, struct page *page,
 	end_pfn = start_pfn + pageblock_nr_pages - 1;
 
 	/* Do not cross zone boundaries */
-	/* 检查开始页框和结束页框是否都处于zone中，如果不属于，则用page作为开始页框 */
+	/* 检查开始页框是否属于zone中，如果不属于，则用page作为开始页框 
+	 * 因为有可能pageblock中一半在上一个zone中，一半在本zone中
+	 */
 	if (!zone_spans_pfn(zone, start_pfn))
 		start_page = page;
-	/* 如果结束页框不属于zone，则直接返回0 */
+	/* 同上如果结束页框不属于zone，不过这里直接返回0 */
 	if (!zone_spans_pfn(zone, end_pfn))
 		return 0;
 
-	/* 将这个pageblock从旧了类型移动到新的类型链表中，order不变，正在使用的页会被跳过 */
+	/* 将此pageblock中的空闲页框全部移动到新的migratetype类型的伙伴系统链表中 */
 	return move_freepages(zone, start_page, end_page, migratetype);
 }
 
@@ -1217,15 +1239,21 @@ static void change_pageblock_range(struct page *pageblock_page,
  * Returns the new migratetype of the pageblock (or the same old migratetype
  * if it was unchanged).
  */
-/* 从page所在的伙伴系统中拿出page所在这段pageblock块，将这个pageblock从旧了类型移动到新的类型链表中，order不变，返回移动的页数量 
- * start_type是我们需要的migratetype,fallback_type是当前遍历到的migratetype
+/* 在当前start_migratetype中没有足够的页进行分配时，则会将获取到的migratetype类型的pageblock中的所有空闲页框移动到start_migratetype中，返回获取的页框本来所属的类型  
+ * 在调用前，page一定是migratetype类型的
+ * 里面的具体做法是:
+ * page是属于migratetype类型的pageblock中的一个页，然后函数中会根据page获取其所在的pageblock
+ * 从pageblock开始的第一页遍历到此pageblock的最后一页
+ * 然后根据page->_mapcount是否等于-1，如果等于-1，说明此页在伙伴系统中，不等于-1则下一页
+ * 对page->_mapcount == -1的页获取order值，order值保存在page->private中，然后将这一段连续空闲页框移动到start_type类型的free_list中
+ * 对这段连续空闲页框首页设置为start_type类型，这样就能表示此段连续空闲页框都是此类型了，通过page->index = start_type设置
+ * 继续遍历，直到整个pageblock遍历结束，这样整个pageblock中的空闲页框都被移动到start_type类型中了
  */
 static int try_to_steal_freepages(struct zone *zone, struct page *page,
 				  int start_type, int fallback_type)
 {
 	/* page是当前遍历到的migratetype当中order页的首页描述符，并不是我们需要的migratetype中的页
 	 * order是当前遍历到的migratetype当中order，并不是当前需要分配的order
-	 *
 	 */
 	int current_order = page_order(page);
 
@@ -1244,7 +1272,7 @@ static int try_to_steal_freepages(struct zone *zone, struct page *page,
 	 * 这种情况发生在pageblock_order等于大页的大小，而内核配置了CONFIG_FORCE_ORDER，导致order >= pageblock_order
 	 */
 	if (current_order >= pageblock_order) {
-		/* 计算出pageblock的块数，然后将每一块都设置为需要的类型，这种情况下并没有把它们从旧类型的伙伴系统移到需要类型的伙伴系统中，在外面函数会将其移出来 */
+		/* 计算出需要的pageblock的块数，然后将每一块都设置为需要的类型，这种情况下并没有把它们从旧类型的伙伴系统移到需要类型的伙伴系统中，在外面函数会将其移出来 */
 		change_pageblock_range(page, current_order, start_type);
 		return start_type;
 	}
@@ -1257,16 +1285,25 @@ static int try_to_steal_freepages(struct zone *zone, struct page *page,
 	    page_group_by_mobility_disabled) {
 		int pages;
 
-		/* 将这个pageblock从旧了类型移动到新的类型链表中，order不变，返回移动的页数量，但是已经在使用的页会被跳过，并且这些已经被使用的页不会被更改为新的类型 */
+		/* 这个page所在的pageblock必定属于fallback_type类型
+		 * 将这个page所在的pageblock中所有空闲页框移动到start_type类型的free_list链表中，order不变，返回移动的页数量，但是已经在使用的页会被跳过，并且这些已经被使用的页不会被更改为新的类型
+		 * 具体做法:
+		 * 从pageblock开始的第一页遍历到此pageblock的最后一页
+		 * 然后根据page->_mapcount是否等于-1，如果等于-1，说明此页在伙伴系统中，不等于-1则下一页
+		 * 对page->_mapcount == -1的页获取order值，order值保存在page->private中，然后将这一段连续空闲页框移动到start_type类型的free_list中
+		 * 对这段连续空闲页框首页设置为start_type类型，这样就能表示此段连续空闲页框都是此类型了，通过page->index = start_type设置
+		 * 继续遍历，直到整个pageblock遍历结束，这样整个pageblock中的空闲页框都被移动到start_type类型中了
+		 */
 		pages = move_freepages_block(zone, page, start_type);
 
 		/* Claim the whole block if over half of it is free */
-		/* 如果这块pageblock中的页数量大于pageblock的页数量的一半，则设置这块为新的migratetype类型，如果小于，则不会把此pageblock设置为新的类型，但是move_freepages_block移动的页已经设置为新的类型 
+		/* 如果这块pageblock中的页数量大于pageblock的页数量的一半，则设置这块pageblock为新的migratetype类型，如果小于，则不会把此pageblock设置为新的类型
+		 * 如果不将pageblock设置为新的类型，会导致一种情况: 空闲页的migratetype类型与pageblock的migratetype类型不一致
 		 * 对于这种情况，在这些正在使用的块被释放时，会被检查是否与所属pageblock的类型一致，不一致则会设置为一致
+		 * 一个zone的每个pageblock的状态占4位，保存在zone->pageblock_flags指向的一个位图中
 		 */
 		if (pages >= (1 << (pageblock_order-1)) ||
 				page_group_by_mobility_disabled) {
-
 			set_pageblock_migratetype(page, start_type);
 			return start_type;
 		}
@@ -1288,9 +1325,10 @@ __rmqueue_fallback(struct zone *zone, unsigned int order, int start_migratetype)
 	int migratetype, new_type, i;
 
 	/* Find the largest possible block of pages in the other list */
+	/* 遍历不同order的链表，如果需要分配2个连续页框，则会遍历1024,512,256,128,64,32,16,8,4,2,1这几个链表，注意这里是倒着遍历的 */
 	for (current_order = MAX_ORDER-1;
 				current_order >= order && current_order <= MAX_ORDER-1;
-				--current_order) { 	/* 遍历不同order的链表，如果需要分配2个连续页框，则会遍历1024,512,256,128,64,32,16,8,4,2,1这几个链表，注意这里是倒着遍历的 */
+				--current_order) { 	
 		for (i = 0;; i++) {  	/* 遍历order链表中对应fallbacks优先级的类型链表 */
 
 			/* 根据fallbacks和i获取migratetype,start_migratetype是申请页框时需要的类型 */
@@ -1328,8 +1366,16 @@ __rmqueue_fallback(struct zone *zone, unsigned int order, int start_migratetype)
 					struct page, lru);
 			area->nr_free--;
 
-			/* 在当前start_migratetype中没有足够的页进行分配时，则会从migratetype获取order或者pageblock相等数量的页框放到start_migratetype中的order链表中，返回获取的页框本来所属的类型  
-			 * 代码中不建议把过低order数量的页框进行移动，最小移动单位是一个pageblock，它的大小是1024个页框或者一个大页的大小。如果order过小则可能不会移动
+			/* 在当前start_migratetype中没有足够的页进行分配时，则会将获取到的migratetype类型的pageblock中的所有空闲页框移动到start_migratetype中，返回获取的页框本来所属的类型  
+			 * 只有系统禁止了page_group_by_mobility_disabled或者order > pageblock_order / 2，才会这样做
+			 * 在调用前，page一定是migratetype类型的
+			 * 里面的具体做法是:
+			 * page是属于migratetype类型的pageblock中的一个页，然后函数中会根据page获取其所在的pageblock
+			 * 从pageblock开始的第一页遍历到此pageblock的最后一页
+			 * 然后根据page->_mapcount是否等于-1，如果等于-1，说明此页在伙伴系统中，不等于-1则下一页
+			 * 对page->_mapcount == -1的页获取order值，order值保存在page->private中，然后将这一段连续空闲页框移动到start_type类型的free_list中
+			 * 对这段连续空闲页框首页设置为start_type类型，这样就能表示此段连续空闲页框都是此类型了，通过page->index = start_type设置
+			 * 继续遍历，直到整个pageblock遍历结束，这样整个pageblock中的空闲页框都被移动到start_type类型中了
 			 */
 			new_type = try_to_steal_freepages(zone, page,
 							  start_migratetype,
@@ -2686,10 +2732,16 @@ __alloc_pages_direct_compact(gfp_t gfp_mask, unsigned int order,
 
 	/* 获取到了连续页框 */
 	if (page) {
+		/* 获取这段页框所在的zone，这里面主要是重置zone跟内存压缩推迟相关的变量 */
 		struct zone *zone = page_zone(page);
 		
 		zone->compact_blockskip_flush = false;
-		/* 重置此zone的压缩推迟计数 */
+		/* 因为这里是获取到了连续页框才会执行到的 
+		 * zone->compact_considered = 0;
+		 * zone->compact_defer_shift = 0;
+		 * if (order >= zone->compact_order_failed)
+		 *     zone->compact_order_failed = order + 1;
+		 */
 		compaction_defer_reset(zone, order, true);
 		count_vm_event(COMPACTSUCCESS);
 		return page;
@@ -2700,7 +2752,7 @@ __alloc_pages_direct_compact(gfp_t gfp_mask, unsigned int order,
 	 * should succeed, so it did not defer compaction. But here we know
 	 * that it didn't succeed, so we do the defer.
 	 */
-	/* 同步情况，并且在此zone压缩后内存足够进行分配了，但是又没有分配成功，则提高此zone的推迟计数器，让其每次推迟更多 */
+	/* 同步和轻同步的情况，并且在此zone压缩后内存足够进行分配了，但是又没有分配成功，则提高此zone的推迟计数器，让其每次推迟更多 */
 	if (last_compact_zone && mode != MIGRATE_ASYNC)
 		defer_compaction(last_compact_zone, order);
 
@@ -3121,11 +3173,12 @@ rebalance:
 	 */
 	/* 还是没有分配到内存 */
 	if (!did_some_progress) {
-		/* 如果是文件系统操作，并且不允许重试，就是这次一定要分配到内存 */
+		/* 如果分配标志中表示允许进行文件系统操作，并且允许重试，那么就允许进行OOM */
 		if (oom_gfp_allowed(gfp_mask)) {
 			if (oom_killer_disabled)
 				goto nopage;
 			/* Coredumps can quickly deplete all memory reserves */
+			/* 分配标志有__GFP_NOFAIL的能够进行OOM */
 			if ((current->flags & PF_DUMPCORE) &&
 			    !(gfp_mask & __GFP_NOFAIL))
 				goto nopage;
@@ -3180,8 +3233,9 @@ rebalance:
 		 * direct reclaim and reclaim/compaction depends on compaction
 		 * being called after reclaim so call directly if necessary
 		 */
-		/* 对zonelist中的每个zone进行轻同步内存压缩，然后在里面继续分配，返回分配到的内存的第一个页框
-		 * 此模式下允许进行大多数操作的阻塞，但不会对隔离出来需要移动的脏页进行回写操作，也不会等待正在回写的脏页回写完成，会阻塞去获取锁
+		/* 如果需要分配的页不是透明大页，或者当前进程是内核线程的情况下，这里会进行轻同步模式的内存压缩，其他情况还是异步的内存压缩
+		 * 如果是进程需要，并且分配的不是透明大页，则会使用轻同步模式
+		 * 在轻同步内存压缩下允许进行大多数操作的阻塞，但不会对隔离出来需要移动的脏页进行回写操作，也不会等待正在回写的脏页回写完成，会阻塞去获取锁
 		 * 回收的数量保存在did_some_progress中，有可能回收到了页框，但是并不够分配
 		 */
 		page = __alloc_pages_direct_compact(gfp_mask, order, zonelist,
@@ -6684,7 +6738,9 @@ void set_pfnblock_flags_mask(struct page *page, unsigned long flags,
 
 	/* 获取页所在的内存管理区 */
 	zone = page_zone(page);
+	/* 获取zone->pageblock_flags指向的此zone的pageblock位图 */
 	bitmap = get_pageblock_bitmap(zone, pfn);
+	/* 根据pfn获取pfn所在的pageblock的位图(占4位) */
 	bitidx = pfn_to_bitidx(zone, pfn);
 	word_bitidx = bitidx / BITS_PER_LONG;
 	bitidx &= (BITS_PER_LONG-1);

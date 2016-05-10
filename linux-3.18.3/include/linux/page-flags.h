@@ -77,7 +77,7 @@ enum pageflags {
 	PG_error, 		/* 在传输页时发生IO错误 */
 	PG_referenced, 	/* 刚刚访问完的页 */
 	PG_uptodate, 	/* 用于表示此页是最新的，1.成功从磁盘读入，在完成读操作后置位，除非发生磁盘IO错误 2.写时复制或者第一次访问页时，获得一个新分配的页，也会对此页置此位 */
-	PG_dirty, 		/* 页已经被修改 */
+	PG_dirty, 		/* 页为脏页，在回写前会被清除，如果回写失败还会置位 */
 	PG_lru, 			/* 页在活动或非活动页链表中 */
 	PG_active, 		/* 页在活动页链表中 */
 	PG_slab, 		/* 包含在slab中的页框 */
@@ -88,8 +88,8 @@ enum pageflags {
 	PG_private_2,		/* If pagecache, has fs aux data */
 	PG_writeback,		/* 正在使用writeback方法将页写到磁盘 */
 #ifdef CONFIG_PAGEFLAGS_EXTENDED
-	PG_head,		/* A head page */
-	PG_tail,		/* A tail page */
+	PG_head,		/* 表示此页是一个大页的第一个页，大页是由多个普通页组成的 */
+	PG_tail,		/* 表示此页是一个大页的最后一个页，大页是由多个普通页组成的 */
 #else
 	PG_compound,		/* 通过扩展分页机制(PAE)处理页框 */
 #endif

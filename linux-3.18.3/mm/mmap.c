@@ -1431,7 +1431,9 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 		struct inode *inode = file_inode(file);
 
 		switch (flags & MAP_TYPE) {
-		/* 文件映射的线性区的页可以被共享，共享时页里的内容并不会写入到文件中，直到msync()或者munmap()被调用 */
+		/* 文件映射的线性区的页可以被共享，共享时页里的内容并不会写入到文件中，直到msync()或者munmap()被调用 
+		 * 是文件mmap共享内存映射，这种映射可用于没有亲属关系的进程
+		 */
 		case MAP_SHARED:
 			/* 检查页和文件能否进行写操作，页与文件必须能够进行写操作 */
 			if ((prot&PROT_WRITE) && !(file->f_mode & FMODE_WRITE))
@@ -1499,6 +1501,7 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 			break;
 			
 		/* 以下匿名映射线性区的页不能被共享，此匿名映射线性区是私有的
+		 * 也叫作私有匿名mmap共享内存映射
 		 * 但是在fork时，子进程会继承此匿名页线性区，并会进行写时复制
 		 */
 		case MAP_PRIVATE:

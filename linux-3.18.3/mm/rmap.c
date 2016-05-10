@@ -1383,7 +1383,7 @@ static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		if (flags & TTU_MUNLOCK)
 			goto out_unmap;
 	}
-	/* 忽略页表项中的Accessed */
+	/* 不忽略页表项中的Accessed，这里就会清除页表项的Accessed标志 */
 	if (!(flags & TTU_IGNORE_ACCESS)) {
 		/* 清除页表项的Accessed标志 */
 		if (ptep_clear_flush_young_notify(vma, address, pte)) {

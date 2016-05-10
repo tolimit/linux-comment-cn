@@ -207,7 +207,7 @@ int add_to_swap(struct page *page, struct list_head *list)
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
 	VM_BUG_ON_PAGE(!PageUptodate(page), page);
 
-	/* 获取一个swap页槽，返回一个页表项，这个页表项会覆盖映射了此页的页表项 */
+	/* 获取一个swap页槽，返回一个一个以此swap页槽作为偏移量的页表项，这个页表项会覆盖映射了此页的页表项 */
 	entry = get_swap_page();
 	if (!entry.val)
 		return 0;

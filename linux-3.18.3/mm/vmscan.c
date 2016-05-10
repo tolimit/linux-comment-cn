@@ -986,7 +986,10 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			goto keep_locked;
 
 		/* Double the slab pressure for mapped and swapcache pages */
-		/* 该页是否处于swapcache中并且有进程映射了此页，swapcache用于在页换出到swap时，页会先跑到swapcache中，当此页完全写入swap分区后，在没有进程对此页进行访问时，swapcache才会释放掉此页 */
+		/* 对于处于swapcache中或者有进程映射了的页，对sc->nr_scanned再进行一次++
+		 * swapcache用于在页换出到swap时，页会先跑到swapcache中，当此页完全写入swap分区后，在没有进程对此页进行访问时，swapcache才会释放掉此页 
+		 * 这样做是为了让sc->nr_scanned增加得更快?
+		 */
 		if (page_mapped(page) || PageSwapCache(page))
 			sc->nr_scanned++;
 

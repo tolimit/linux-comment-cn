@@ -451,7 +451,7 @@ struct zone {
 	 * Flags for a pageblock_nr_pages block. See pageblock-flags.h.
 	 * In SPARSEMEM, this map is stored in struct mem_section
 	 */
-	/* 一个位图，每2^pageblock_order个页框为一个pageblock，每2^pageblock_order个页框占4位，设置此组页框的类型(MIGRATE_MOVABLE,MIGRATE_UNMOVABLE等) */
+	/* 会指向一个位图，每2^pageblock_order个页框为一个pageblock，每2^pageblock_order个页框占4位，设置此组页框的类型(MIGRATE_MOVABLE,MIGRATE_UNMOVABLE等) */
 	unsigned long		*pageblock_flags;
 #endif /* CONFIG_SPARSEMEM */
 
@@ -611,11 +611,18 @@ struct zone {
 	unsigned long percpu_drift_mark;
 
 #if defined CONFIG_COMPACTION || defined CONFIG_CMA
-	/* pfn where compaction free scanner should start */
-	/* 空闲页框扫描起始位置，开始设置时是管理区的最后一个页框 */
+	/* 以下两个参数保存的是内存压缩的两个扫描的起始位置 */
+
+	/* 空闲页框扫描起始位置，开始设置时是管理区的最后一个页框
+	 * 在内存压缩扫描可以移动的页时，从本次内存压缩开始到此pageblock结束都没有隔离出可移动页时，会将此值设置为pageblock的最后一页
+	 * 此值默认是zone的结束页框
+	 */
 	unsigned long		compact_cached_free_pfn;
 	/* pfn where async and sync compaction migration scanner should start */
-	/* 0用于异步，1用于同步，用于保存管理区可移动页框扫描起始位置 */
+	/* 0用于异步，1用于同步，用于保存管理区可移动页框扫描起始位置 
+	 * 在内存压缩扫描空闲页时，从本次内存压缩开始到此pageblock结束都没有隔离出空闲页时，会将此值设置为pageblock的最后一页
+	 * 此值默认是zone的开始页框
+	 */
 	unsigned long		compact_cached_migrate_pfn[2];
 #endif
 
@@ -625,20 +632,30 @@ struct zone {
 	 * are skipped before trying again. The number attempted since
 	 * last failure is tracked with compact_considered.
 	 */
-	/* 这两个用于推迟内存压缩处理，只有当需要的order数量大于compact_order_failed才会推迟 */
-	/* 用于判断是否需要推迟，每次推迟会++，然后判断是否超过 1UL << compact_defer_shift，超过了则要进行内存压缩，当管理区的内存压缩成功后被置0 */
+	/* 这两个用于推迟内存压缩处理，只有当内存压缩时使用的order大于compact_order_failed才会推迟 
+	 * 只有一种情况会重置这两个值:在zone执行内存压缩后，从此zone中分配到了内存，会重置
+	 */
+	/* 用于判断是否需要推迟，每次推迟会++，然后判断是否超过 1UL << compact_defer_shift，超过了则要进行内存压缩
+	 */
 	unsigned int		compact_considered;
-	/* 用于保存最大推迟次数，当次管理区的内存压缩成功后被置0，不会大于COMPACT_MAX_DEFER_SHIFT */
+	/* 用于保存最大推迟次数，当次管理区的内存压缩成功后被置0，不会大于COMPACT_MAX_DEFER_SHIFT
+	 * 只有在同步和轻同步模式下进行内存压缩后，zone的空闲页框数量没达到 (low阀值 + 1<<order + 保留内存) 时，才会增加此值
+	 */
 	unsigned int		compact_defer_shift;
-	/* 置为内存压缩失败时的order值+1，无论是否压缩成功，压缩结束后，此值都会为压缩时最大order值+1 
-	 * 而在内存压缩推迟过程中，此值会设置为推迟时内存压缩使用的order值
+	/* 
+	 * 表示zone内存压缩失败时使用的最大order值，此值会影响是否推迟内存压缩
+	 * 当进行内存压缩时，使用的order小于此值，则允许进行内存压缩，否则记一次推迟
+	 * 当内存压缩完成时，此值为使用的order值+1，意思是假设大一级的order在压缩中会失败
+	 * 当内存压缩失败时，此值则是等于order值，表示使用此大小的order值，有可能会导致失败
 	 */
 	int			compact_order_failed;
 #endif
 
 #if defined CONFIG_COMPACTION || defined CONFIG_CMA
 	/* Set to true when the PG_migrate_skip bits should be cleared */
-	/* 如果为真，则清除页描述符的PG_migrate_skip标志，此标志用于表示此页是否可以进行内存压缩扫描 */
+	/* 如果为真，则清除页描述符的PG_migrate_skip标志，此标志用于表示此页是否可以进行内存压缩扫描
+	 * 在完全扫描完一次后(cc->free_pfn <= cc->migrate_pfn)，如果不是kswapd完成的，那就对此设置为真
+	 */
 	bool			compact_blockskip_flush;
 #endif
 

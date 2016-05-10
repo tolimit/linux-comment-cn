@@ -2957,7 +2957,9 @@ static inline void *____cache_alloc(struct kmem_cache *cachep, gfp_t flags)
 
 	check_irq_off();
 
+	/* 获取此slab缓存的当前CPU的高速缓存 */
 	ac = cpu_cache_get(cachep);
+	/* 如果当前CPU的此slab高速缓存中有空闲对象 */
 	if (likely(ac->avail)) {
 		ac->touched = 1;
 		objp = ac_get_obj(cachep, ac, flags, false);
@@ -2967,6 +2969,7 @@ static inline void *____cache_alloc(struct kmem_cache *cachep, gfp_t flags)
 		 * by the current flags
 		 */
 		if (objp) {
+			/* 增加统计从CPU分配了slab对象的次数 */
 			STATS_INC_ALLOCHIT(cachep);
 			goto out;
 		}
@@ -3426,6 +3429,7 @@ free_done:
 static inline void __cache_free(struct kmem_cache *cachep, void *objp,
 				unsigned long caller)
 {
+	/* 获取本地CPU的SLAB对象高速缓存 */
 	struct array_cache *ac = cpu_cache_get(cachep);
 
 	check_irq_off();
@@ -3627,6 +3631,7 @@ EXPORT_SYMBOL(kmem_cache_free);
  * Don't free memory not originally allocated by kmalloc()
  * or you will run into trouble.
  */
+/* slab对象的释放函数 */
 void kfree(const void *objp)
 {
 	struct kmem_cache *c;
@@ -3638,10 +3643,12 @@ void kfree(const void *objp)
 		return;
 	local_irq_save(flags);
 	kfree_debugcheck(objp);
+	/* 获取所属的slab缓存结构体 */
 	c = virt_to_cache(objp);
 	debug_check_no_locks_freed(objp, c->object_size);
 
 	debug_check_no_obj_freed(objp, c->object_size);
+	/* 释放函数 */
 	__cache_free(c, (void *)objp, _RET_IP_);
 	local_irq_restore(flags);
 }

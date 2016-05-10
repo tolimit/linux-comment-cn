@@ -51,13 +51,13 @@ extern unsigned long compaction_suitable(struct zone *zone, int order);
  * allocation success. 1 << compact_defer_limit compactions are skipped up
  * to a limit of 1 << COMPACT_MAX_DEFER_SHIFT
  */
-/* 推迟压缩，提高推迟压缩计数
+/* 推迟压缩，提高推迟压缩阀值计数器
  * 此函数在zone进行内存压缩之后，还是无法从此zone获取连续页框时调用，为了让此zone更多的推迟进行内存压缩，反正短期内在此zone进行内存压缩也没有效果
  */
 static inline void defer_compaction(struct zone *zone, int order)
 {
 	zone->compact_considered = 0;
-	/* 推迟计数++ */
+	/* 推迟限制阀值++ */
 	zone->compact_defer_shift++;
 
 	/* 此zone此次压缩失败的order值保存到zone->compact_order_failed */
@@ -91,6 +91,9 @@ static inline bool compaction_deferred(struct zone *zone, int order)
  * Update defer tracking counters after successful compaction of given order,
  * which means an allocation either succeeded (alloc_success == true) or is
  * expected to succeed.
+ */
+/* 在内存压缩完成后调用，当内存压缩成功后，会重置压缩推迟计数器
+ * 而不确定是否成功时，只是设置了zone->compact_order_failed = order + 1
  */
 static inline void compaction_defer_reset(struct zone *zone, int order,
 		bool alloc_success)

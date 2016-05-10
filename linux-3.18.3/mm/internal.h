@@ -167,19 +167,26 @@ struct compact_control {
 	unsigned long free_pfn;		/* isolate_freepages search base */
 	/* 可移动页框扫描所在页框号 */
 	unsigned long migrate_pfn;	/* isolate_migratepages search base */
+	/* 内存压缩使用的模式: 同步，轻同步，异步 */
 	enum migrate_mode mode;		/* Async or sync migration mode */
+	/* 是否忽略pageblock的PB_migrate_skip标志对需要跳过的pageblock进行扫描 ，并且也不会对pageblock设置跳过
+	 * 只有两种情况会使用
+	 * 1.调用alloc_contig_range()尝试分配一段指定了开始页框号和结束页框号的连续页框时；
+	 * 2.通过写入1到sysfs中的/vm/compact_memory文件手动实现同步内存压缩。
+	 */
 	bool ignore_skip_hint;		/* Scan blocks even if marked skip */
-	/* freepages是否获取到了空闲页框 */
+	/* 本次内存压缩是否隔离到了空闲页框，会影响zone的空闲页扫描起始位置 */
 	bool finished_update_free;	/* True when the zone cached pfns are
 					 * no longer being updated
 					 */
+	/* 本次内存压缩是否隔离到了可移动页框，会影响zone的可移动页扫描起始位置 */
 	bool finished_update_migrate;
 	/* 申请内存时需要的页框的order值 */
 	int order;			/* order a direct compactor needs */
 	const gfp_t gfp_mask;		/* gfp mask of a direct compactor */
 	/* 扫描的管理区 */
 	struct zone *zone;
-	/* 保存结果 */
+	/* 保存结果，比如异步模式下是否因为需要阻塞而结束了本次内存压缩 */
 	int contended;			/* Signal need_sched() or lock
 					 * contention detected during
 					 * compaction

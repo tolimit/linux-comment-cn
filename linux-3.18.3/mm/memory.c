@@ -2487,8 +2487,12 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		goto out;
 	}
 	delayacct_set_flag(DELAYACCT_PF_SWAPIN);
+	/* 从swap cache中获取此页，如果此页不在swap cache中，那么为NULL
+	 * 而此页在swap cache中的情况，就是此页加入swap cache ~ 被回收前 的这段时间
+	 */
 	page = lookup_swap_cache(entry);
 	if (!page) {
+		/* 此页不在swap cache中，从swap分区读进来 */
 		page = swapin_readahead(entry,
 					GFP_HIGHUSER_MOVABLE, vma, address);
 		if (!page) {

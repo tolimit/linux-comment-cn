@@ -955,6 +955,7 @@ int try_to_free_swap(struct page *page)
 	if (pm_suspended_storage())
 		return 0;
 
+	/* 将此页从swapcache中清除，并且page->_count-- */
 	delete_from_swap_cache(page);
 	SetPageDirty(page);
 	return 1;

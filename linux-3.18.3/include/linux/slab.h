@@ -409,10 +409,13 @@ static __always_inline void *kmalloc_large(size_t size, gfp_t flags)
  * for general use, and so are not documented here. For a full list of
  * potential flags, always refer to linux/gfp.h.
  */
+/* 分配一个常规类型的slab */
 static __always_inline void *kmalloc(size_t size, gfp_t flags)
 {
 	if (__builtin_constant_p(size)) {
+		/* 需要分配的大小是否超过了slab对象最大值，这个最大值一般为页的整数倍 */
 		if (size > KMALLOC_MAX_CACHE_SIZE)
+			/* 这里实际上就是调用页框分配器了 */
 			return kmalloc_large(size, flags);
 #ifndef CONFIG_SLOB
 		if (!(flags & GFP_DMA)) {
@@ -426,6 +429,7 @@ static __always_inline void *kmalloc(size_t size, gfp_t flags)
 		}
 #endif
 	}
+	/**/
 	return __kmalloc(size, flags);
 }
 

@@ -182,10 +182,16 @@ void reset_isolation_suitable(pg_data_t *pgdat)
  * If no pages were isolated then mark this pageblock to be skipped in the
  * future. The information is later cleared by __reset_isolation_suitable().
  */
+/* 如果没有能从pageblock中将页隔离出来那么就设置此pageblock需要跳过
+ * 而如果从内存压缩到现在都没有隔离出对应的页，则会重新设置zone扫描起始位置
+ * 在非kswapd内存压缩中，会对zone的所有pageblock的PB_migrate_skip做清除
+ * 在一次完整内存压缩结束后(两个扫描交汇)，会对zone的所有pageblock的PB_migrate_skip做清除
+ */
 static void update_pageblock_skip(struct compact_control *cc,
 			struct page *page, unsigned long nr_isolated,
 			bool migrate_scanner)
 {
+	/* 获取对应的zone */
 	struct zone *zone = cc->zone;
 	unsigned long pfn;
 
@@ -195,25 +201,37 @@ static void update_pageblock_skip(struct compact_control *cc,
 	if (!page)
 		return;
 
+	/* 此pageblock有隔离出页框，则返回 */
 	if (nr_isolated)
 		return;
 
+	/* 设置此页所在的pageblock的PB_migrate_skip标志 */
 	set_pageblock_skip(page);
 
+	/* page对应的页框ID */
 	pfn = page_to_pfn(page);
 
 	/* Update where async and sync compaction should restart */
+	/* 下面主要处理本次内存压缩到现在都没有隔离出对应页框时的情况 */
 	if (migrate_scanner) {
+		/* 本次内存压缩到现在已经隔离出可移动页时，就不做处理，直接返回 */
 		if (cc->finished_update_migrate)
 			return;
+		/* 本次内存压缩到现在都没有隔离出可移动页时的情况 
+		 * 会将可移动页扫描起始位置设置为此pageblock的结束页框
+		 */
 		if (pfn > zone->compact_cached_migrate_pfn[0])
 			zone->compact_cached_migrate_pfn[0] = pfn;
 		if (cc->mode != MIGRATE_ASYNC &&
 		    pfn > zone->compact_cached_migrate_pfn[1])
 			zone->compact_cached_migrate_pfn[1] = pfn;
 	} else {
+		/* 本次内存压缩到现在已经隔离出空闲页时，就不做处理，直接返回 */
 		if (cc->finished_update_free)
 			return;
+		/* 本次内存压缩到现在都没有隔离出空闲页时的情况 
+		 * 会将空闲页扫描起始位置设置为此pageblock的结束页框
+		 */
 		if (pfn < zone->compact_cached_free_pfn)
 			zone->compact_cached_free_pfn = pfn;
 	}
@@ -765,9 +783,9 @@ isolate_success:
 		cc->finished_update_migrate = true;
 		/* 将此页加入到本次压缩需要移动页链表中 */
 		list_add(&page->lru, migratelist);
-		/* 需要移动的页框数量++ */
+		/* 本次内存压缩中可移动的页框数量++ */
 		cc->nr_migratepages++;
-		/* 隔离数量++ */
+		/* 此pageblock中隔离的页数量++ */
 		nr_isolated++;
 
 		/* Avoid isolating too much */
@@ -793,13 +811,8 @@ isolate_success:
 	 * Update the pageblock-skip information and cached scanner pfn,
 	 * if the whole pageblock was scanned without isolating any page.
 	 */
-	/* 如果全部的页框块都扫描过了，并且没有隔离任何一个页，则标记最后这个页所在的pageblock为PB_migrate_skip，然后
-	 * 	if (pfn > zone->compact_cached_migrate_pfn[0])
-			zone->compact_cached_migrate_pfn[0] = pfn;
-		if (cc->mode != MIGRATE_ASYNC &&
-		    pfn > zone->compact_cached_migrate_pfn[1])
-			zone->compact_cached_migrate_pfn[1] = pfn;
-	 *
+	/* 如果此pageblock全部的页框块都扫描过了，并且没有隔离任何一个页，则标记最后这个页所在的pageblock为PB_migrate_skip
+	 * 如果本次内存压缩从开始到现在都没有隔离出页，则将内存压缩扫描的起始位置设置为此pageblock结束位置，当zone完整进行一次内存压缩后(两个扫描相会)，会重置扫描起始位置
 	 */
 	if (low_pfn == end_pfn)
 		update_pageblock_skip(cc, valid_page, nr_isolated, true);
@@ -1085,13 +1098,14 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 	low_pfn = cc->migrate_pfn;
 
 	/* Only scan within a pageblock boundary */
-	/* 以1024对齐 */
+	/* 以pageblock_nr_pages对齐 */
 	end_pfn = ALIGN(low_pfn + 1, pageblock_nr_pages);
 
 	/*
 	 * Iterate over whole pageblocks until we find the first suitable.
 	 * Do not cross the free scanner.
 	 */
+	/* 一次遍历一个pageblock，直到end_pfn > 空闲页框扫描位置 */
 	for (; end_pfn <= cc->free_pfn;
 			low_pfn = end_pfn, end_pfn += pageblock_nr_pages) {
 
@@ -1105,13 +1119,15 @@ static isolate_migrate_t isolate_migratepages(struct zone *zone,
 						&& compact_should_abort(cc))
 			break;
 
-		/* 获取第一个页框，需要检查是否属于此zone */
+		/* 获取第一个页框，需要检查是否属于此zone，一般都是low_pfn对应的页框 */
 		page = pageblock_pfn_to_page(low_pfn, end_pfn, zone);
 		if (!page)
 			continue;
 
 		/* If isolation recently failed, do not retry */
-		/* 获取页框的PB_migrate_skip标志，如果设置了则跳过这个1024个页框 */
+		/* 获取页所在的pageblock的PB_migrate_skip标志，如果pageblock置位了PB_migrate_skip，则跳过这个1024个页框 
+		 * 但是如果cc->ignore_skip_hint设置了则忽略pageblock的PB_migrate_skip标志对pageblock进行扫描
+		 */
 		if (!isolation_suitable(cc, page))
 			continue;
 
@@ -1176,7 +1192,9 @@ static int compact_finished(struct zone *zone, struct compact_control *cc,
 		return COMPACT_PARTIAL;
 
 	/* Compaction run completes if the migrate and free scanner meet */
-	/* 检查可移动页框扫描的位置是否已经超过了空闲页框扫描的位置 */
+	/* 检查可移动页框扫描的位置是否已经超过了空闲页框扫描的位置 
+	 * 用于判断是不是将zone完全扫描了一次
+	 */
 	if (cc->free_pfn <= cc->migrate_pfn) {
 		/* Let the next compaction start anew. */
 		/* 超过的情况下，重置可移动页框扫描和空闲页框扫描的起始位置 */
@@ -1297,7 +1315,7 @@ unsigned long compaction_suitable(struct zone *zone, int order)
 	return COMPACT_CONTINUE;
 }
 
-/* 内存压缩主要实现函数 */
+/* 对zone进行内存压缩主要实现函数 */
 static int compact_zone(struct zone *zone, struct compact_control *cc)
 {
 	int ret;
@@ -1333,9 +1351,13 @@ static int compact_zone(struct zone *zone, struct compact_control *cc)
 	 * is about to be retried after being deferred. kswapd does not do
 	 * this reset as it'll reset the cached information when going to sleep.
 	 */
-	/* 如果不是在kswapd线程中，并且推迟次数超过了最大推迟次数则会执行这个if语句 */
+	/* 如果不是在kswapd线程中并且此zone的内存压缩推迟次数超过了最大推迟次数 */
 	if (compaction_restarting(zone, cc->order) && !current_is_kswapd())
-		/* 设置zone中所有pageblock都不能跳过扫描 */
+		/* 只有不是在kswapd线程中并且此zone的内存压缩推迟次数超过了最大推迟次数的时候才会执行如下操作
+	 	 * zone->compact_cached_migrate_pfn[sync/async]设置为此zone的起始页框，compact_cached_free_pfn设置为此zone的结束页框
+	 	 * zone->compact_blockskip_flush = false
+	 	 * 将zone中所有pageblock的PB_migrate_skip清空
+	 	 */
 		__reset_isolation_suitable(zone);
 
 	/*
@@ -1343,18 +1365,20 @@ static int compact_zone(struct zone *zone, struct compact_control *cc)
 	 * information on where the scanners should start but check that it
 	 * is initialised by ensuring the values are within zone boundaries.
 	 */
-	/* 可移动页框扫描起始页框号，在__reset_isolation_suitable会被设置为zone中第一个页框 */
+	/* 将可移动页框扫描起始页框号设为zone->compact_cached_migrate_pfn[sync/async] */
 	cc->migrate_pfn = zone->compact_cached_migrate_pfn[sync];
-	/* 空闲页框扫描起始页框号，这两个都是在__reset_isolation_suitable()中设置，此项被设置为zone中最后一个页框 */
+	/* 空闲页框扫描起始页框号设置为zone->compact_cached_free_pfn */
 	cc->free_pfn = zone->compact_cached_free_pfn;
-	/* 检查cc->free_pfn，并将其重置到管理区最后一个完整pageblock的最后一块页框，
-	 * 有可能管理区的大小并不是pageblock的整数倍，最后一个pageblock不是完整的，就把这个页框块忽略，不进行扫描 
+	/* 检查cc->free_pfn，如果空闲页框扫描起始页框不在zone的范围内，则将空闲页框扫描起始页框设置为zone的最后一个页框
+	 * 并且也会将zone->compact_cached_free_pfn设置为zone的最后一个页框
 	 */
 	if (cc->free_pfn < start_pfn || cc->free_pfn > end_pfn) {
 		cc->free_pfn = end_pfn & ~(pageblock_nr_pages-1);
 		zone->compact_cached_free_pfn = cc->free_pfn;
 	}
-	/* 同上，检查cc->migrate_pfn，并整理可移动页框扫描的起始页框 */
+	/* 同上，检查cc->migrate_pfn，如果可移动页框扫描起始页框不在zone的范围内，则将可移动页框扫描起始页框设置为zone的第一个页框
+	 * 并且也会将zone->compact_cached_free_pfn设置为zone的第一个页框
+	 */
 	if (cc->migrate_pfn < start_pfn || cc->migrate_pfn > end_pfn) {
 		cc->migrate_pfn = start_pfn;
 		zone->compact_cached_migrate_pfn[0] = cc->migrate_pfn;
@@ -1367,8 +1391,8 @@ static int compact_zone(struct zone *zone, struct compact_control *cc)
 	migrate_prep_local();
 
 	/* 判断是否结束本次内存压缩 
-	 * 1.可移动页框扫描的位置是否已经超过了空闲页框扫描的位置，超过则结束压缩
-	 * 2.判断zone的空闲页框数量是否达到标准，如果没达到zone的low阀值标准则继续
+	 * 1.可移动页框扫描的位置是否已经超过了空闲页框扫描的位置，超过则结束压缩，并且会重置zone->compact_cached_free_pfn和zone->compact_cached_migrate_pfn
+	 * 2.判断zone的空闲页框数量是否达到标准，标志是zone的空闲页框数量满足 (zone的low阀值 + 1<<order + zone的保留页框)
 	 * 3.判断伙伴系统中是否有比order值大的空闲连续页框块，有则结束压缩
 	 * 如果是管理员写入到/proc/sys/vm/compact_memory进行强制内存压缩的情况，则判断条件只有第1条
 	 */
@@ -1479,9 +1503,8 @@ int sysctl_extfrag_threshold = 500;
  *
  * This is the main entry point for direct page compaction.
  */
-/* 尝试每个管理区进行内存压缩空闲出一些页 
+/* 尝试zonelist中的每个zone进行内存压缩
  * order: 2的次方，如果是分配时调用到，这个就是分配时希望获取的order，如果是通过写入/proc/sys/vm/compact_memory文件进行强制内存压缩，order就是-1
- *
  */
 unsigned long try_to_compact_pages(struct zonelist *zonelist,
 			int order, gfp_t gfp_mask, nodemask_t *nodemask,
@@ -1489,9 +1512,9 @@ unsigned long try_to_compact_pages(struct zonelist *zonelist,
 			struct zone **candidate_zone)
 {
 	enum zone_type high_zoneidx = gfp_zone(gfp_mask);
-	/* 表示运行使用文件系统IO */
+	/* 表示能够使用文件系统的IO操作 */
 	int may_enter_fs = gfp_mask & __GFP_FS;
-	/* 表示可以使用磁盘IO */
+	/* 表示可以使用磁盘的IO操作 */
 	int may_perform_io = gfp_mask & __GFP_IO;
 	struct zoneref *z;
 	struct zone *zone;
@@ -1502,7 +1525,7 @@ unsigned long try_to_compact_pages(struct zonelist *zonelist,
 	*contended = COMPACT_CONTENDED_NONE;
 
 	/* Check if the GFP flags allow compaction */
-	/* 如果order=0或者不允许使用文件系统IO和磁盘IO，则跳过本次压缩，因为不使用IO有可能导致死锁 */
+	/* 如果order = 0或者不允许使用文件系统IO和磁盘IO，则跳过本次压缩，因为不使用IO有可能导致死锁 */
 	if (!order || !may_enter_fs || !may_perform_io)
 		return COMPACT_SKIPPED;
 
@@ -1512,21 +1535,23 @@ unsigned long try_to_compact_pages(struct zonelist *zonelist,
 		alloc_flags |= ALLOC_CMA;
 #endif
 	/* Compact each zone in the list */
-	/* 遍历管理区链表中所有的管理区 */
+	/* 遍历zonelist中的每一个zone */
 	for_each_zone_zonelist_nodemask(zone, z, zonelist, high_zoneidx,
 								nodemask) {
 		int status;
 		int zone_contended;
 
-		/* 检查管理区设置中是否需要跳过此次压缩 
+		/* 检查管理区设置中是否需要跳过此次压缩，当order < zone->compact_order_failed时是不需要跳过的
 		 * 判断标准是:
 		 * zone->compact_considered是否小于1UL << zone->compact_defer_shift
 		 * 小于则推迟，并且zone->compact_considered++，也就是这个函数会主动去推迟此管理区的内存压缩
+		 * 本次请求的order值小于之前失败时的order值，那这次压缩必须要进行
+		 * zone->compact_considered和zone->compact_defer_shift会只有在内存压缩完成后，从此zone获取到了连续的1 << order个页框的情况下会重置为0。
 		 */
 		if (compaction_deferred(zone, order))
 			continue;
 
-		/* 进行管理区的内存压缩 */
+		/* 对遍历到的zone进行内存压缩 */
 		status = compact_zone_order(zone, order, gfp_mask, mode,
 							&zone_contended);
 		rc = max(status, rc);
@@ -1537,7 +1562,7 @@ unsigned long try_to_compact_pages(struct zonelist *zonelist,
 		all_zones_contended &= zone_contended;
 
 		/* If a normal allocation would succeed, stop compacting */
-		/* 判断压缩后是否足够进行内存分配，如果足够，则不会对下个zone进行压缩了，直接跳出 */
+		/* 判断压缩后此zone 分配1 << order个页框后剩余的页框数量 是否 大于 此zone的低阀值 + 保留的页框数量 */
 		if (zone_watermark_ok(zone, order, low_wmark_pages(zone), 0,
 				      alloc_flags)) {
 			*candidate_zone = zone;
@@ -1547,7 +1572,9 @@ unsigned long try_to_compact_pages(struct zonelist *zonelist,
 			 * will repeat this with true if allocation indeed
 			 * succeeds in this zone.
 			 */
-			/* 重新设置内存压缩计数器，让其归0，也就是重新计算内存压缩请求 */
+			/* 当zone内存满足low阀值 + (1 << order) + 保留的内存 时，则将compact_order_failed设置为本次压缩的order + 1 
+			 * 因为这里还不确定内存压缩是否成功了，只是此zone的剩余页框满足了要求
+			 */
 			compaction_defer_reset(zone, order, false);
 			/*
 			 * It is possible that async compaction aborted due to
@@ -1561,17 +1588,24 @@ unsigned long try_to_compact_pages(struct zonelist *zonelist,
 			if (zone_contended == COMPACT_CONTENDED_SCHED)
 				*contended = COMPACT_CONTENDED_SCHED;
 
+			/* 当zone中空闲内存达到 low阀值 + (1 << order) + 保留的内存 时，就不对下面的zone进行内存压缩了 */
 			goto break_loop;
 		}
 
-		/* 如果是同步压缩 */
+		/* 以下的代码就是zone本次内存压缩后，剩余页框数量还是没达到 zone的low阀值 + 本次需要分配的页框数量 + zone的保留页框数量 */
+		
+		/* 如果是同步压缩或者轻同步压缩，则增加推迟计数器阀值zone->compact_defer_shift */
 		if (mode != MIGRATE_ASYNC) {
 			/*
 			 * We think that allocation won't succeed in this zone
 			 * so we defer compaction there. If it ends up
 			 * succeeding after all, it will be reset.
 			 */
-			/* 提高内存压缩计数器的阀值，zone的内存压缩计数器阀值 */
+			/* 提高内存压缩计数器的阀值，zone的内存压缩计数器阀值 ，也就是只有同步压缩会增加推迟计数器的阀值
+			 * 重置zone->compact_considered = 0
+			 * 如果zone->compact_defer_shift < COMPACT_MAX_DEFER_SHIFT，那么zone->compact_defer_shift++
+			 * 如果order < zone->compact_order_failed，那么zone->compact_order_failed = order
+			 */
 			defer_compaction(zone, order);
 		}
 

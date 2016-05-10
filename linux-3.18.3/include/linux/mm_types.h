@@ -223,6 +223,7 @@ struct page {
 #endif
 		/* SLAB描述符使用，指向SLAB的高速缓存 */
 		struct kmem_cache *slab_cache;	/* SL[AU]B: Pointer to slab */
+		/* 大页时使用，大页是由多个连续普通页组成的，指向大页的第一个普通页的页描述符 */
 		struct page *first_page;	/* Compound tail pages */
 	};
 

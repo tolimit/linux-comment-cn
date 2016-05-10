@@ -233,7 +233,7 @@ int swap_writepage(struct page *page, struct writeback_control *wbc)
 {
 	int ret = 0;
 
-	/* 如果已经没有进程映射此匿名页了，则释放掉此页，此页已经不需要回写了 */
+	/* 如果已经没有进程映射此非文件页了，则释放掉此页，此页已经不需要回写了 */
 	if (try_to_free_swap(page)) {
 		unlock_page(page);
 		goto out;
